@@ -1,6 +1,6 @@
 # Assignment4
 
-# Overview
+## Overview
 
 In this assignment, you will be tasked with creating a client-server application where the client downloads a pre-specified file from the server using **UDP**. Since UDP (User Datagram Protocol) is unreliable and does not provide congestion control, you will design and implement mechanisms to ensure **reliability** and **congestion control** at the application layer. In particular, you should implement:
 
@@ -115,4 +115,4 @@ Your score for this part will depend on both **correctness** and **performance**
 
 - 50% — correctness and completion of all parts  
 - 25% — meeting performance targets (we’ll share these limits later)  
-- 25% — efficiency of your protocol compared to others (we’ll test all submissions, rank them by file download time, and assign marks based on decile rank, rounded up).For example, if your performance is at the 51st percentile, you’ll get 15 marks.
+- 25% — efficiency of your protocol compared to others (we’ll test all submissions, rank them by file download time for each test case, take the average rank, and assign marks based on decile rank, rounded up). For example, if your performance is at the 51st percentile, you’ll get 15 marks.
