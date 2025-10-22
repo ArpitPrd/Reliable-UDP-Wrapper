@@ -39,17 +39,17 @@ Recall that the sender window size (SWS) limits the number of bytes that can be 
 
 ### Packet Format
 
-Assume UDP packets with a maximum payload size of **1200 bytes**. You shouldn’t send payloads larger than this number. The first 10 bytes of this payload will be the headers for the reliability protocols, while the remaining bytes will carry the data.
+Assume UDP packets with a maximum payload size of **1200 bytes**. You shouldn’t send payloads larger than this number. The first 20 bytes of this payload will be the headers for the reliability protocols, while the remaining bytes will carry the data.
 
 **Structure:**
 - The first **4 bytes (32 bits)** are the **sequence number**.  
   - For data packets (server → client), it represents the data sequence number.  
   - For ACK packets (client → server), it represents the next expected sequence number (like in TCP).
-- The next **6 bytes** are **reserved for optional features** (e.g., SACK or timestamps). You can use them or leave them unused. The server should not send data in these bytes.
-- The rest of the bytes (up to **1190 bytes**) carry the actual data.
+- The next **16 bytes** are **reserved for optional features** (e.g., SACK or timestamps). You can use them or leave them unused. The server should not send data in these bytes.
+- The rest of the bytes (up to **1180 bytes**) carry the actual data.
 
 ```
-| Sequence Number (4 bytes) | Reserved / Optional (6 bytes) | Data (up to 1190 bytes) |
+| Sequence Number (4 bytes) | Reserved / Optional (16 bytes) | Data (up to 1180 bytes) |
 ```
 
 ---
