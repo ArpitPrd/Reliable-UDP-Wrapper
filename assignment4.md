@@ -117,6 +117,8 @@ Your score for this part will depend on both **correctness** and **performance**
 - 25% — meeting performance targets (we’ll share these limits later)  
 - 25% — efficiency of your protocol compared to others (we’ll test all submissions, rank them by file download time for each test case, take the average rank, and assign marks based on decile rank, rounded up). For example, if your performance is at the 51st percentile, you’ll get 15 marks.
 
+---
+
 ## Part 2: Congestion Control (60%)
 
 You will implement a congestion control algorithm based on a sliding window approach. However, the number of unacknowledged bytes should be controlled to avoid overwhelming the network. You should take care of the following implementation details:
