@@ -1,0 +1,16 @@
+# Loss experiment 
+loss,delay,jitter,ttc
+1,20,0,28
+2,20,0,33
+3,20,0,39
+4,20,0,41
+5,20,0,48
+
+
+# Jitter experiment
+loss,delay,jitter,ttc
+1,20,20,28
+1,20,40,36
+1,20,60,42
+1,20,80,53
+1,20,100,59
