@@ -9,8 +9,10 @@ import os
 # - Sequence Number (I): 4 bytes, unsigned int
 # - ACK Number (I): 4 bytes, unsigned int
 # - Flags (H): 2 bytes, unsigned short (SYN=1, ACK=2, EOF=4)
-# - Reserved (10 bytes): Padding to 20 bytes
-HEADER_FORMAT = "!IIH10x"
+# - SACK Start (I): 4 bytes
+# - SACK End (I): 4 bytes
+# - Padding (2x): 2 bytes
+HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
 MSS_BYTES = 1200  # Max Segment Size (matches assignment)
 PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE  # 1180 bytes
@@ -38,22 +40,28 @@ class Client:
         self.next_expected_seq_num = 0
         
         # --- Receive Buffer ---
-        # {seq_num: data} for out-of-order packets
+        # {seq_num: (data, flags)} for out-of-order packets
         self.receive_buffer = {}
         
         print(f"Client ready to connect to {server_ip}:{server_port}")
         print(f"Will save to: {output_filename}")
 
-    def pack_header(self, seq_num, ack_num, flags):
+    def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         """Packs the header into bytes."""
-        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags)
+        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags, sack_start, sack_end)
 
     def unpack_header(self, packet):
         """Unpacks the header from bytes."""
         try:
-            return struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
+            # Unpack the fixed header part
+            seq_num, ack_num, flags, sack_start, sack_end = struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
+            # The rest is data
+            data = packet[HEADER_SIZE:]
+            return seq_num, ack_num, flags, sack_start, sack_end, data
         except struct.error:
-            return None, None, None, None
+            # Handle packets that are too small or malformed
+            # print("Received malformed packet.")
+            return None, None, None, None, None, None
 
     def send_request(self):
         """Sends the initial 1-byte file request."""
@@ -76,14 +84,15 @@ class Client:
         print("Failed to connect to server after 5 attempts.")
         return None
 
-    def prepare_ack(self, ack_num, flags=ACK_FLAG):
+    def prepare_ack(self, ack_num, flags=ACK_FLAG, sack_start=0, sack_end=0):
         """Prepares and sends an ACK packet."""
-        # rwnd = self.update_rwnd()
-        # For this assignment, rwnd isn't used by the server, so we send 0
-        header = self.pack_header(0, ack_num, flags)
+        header = self.pack_header(0, ack_num, flags, sack_start, sack_end)
         try:
             self.socket.sendto(header, self.server_addr)
-            # print(f"Sent ACK for: {ack_num}")
+            # if sack_start > 0:
+            #     print(f"Sent ACK for: {ack_num} with SACK [{sack_start}, {sack_end})")
+            # else:
+            #     print(f"Sent ACK for: {ack_num}")
         except Exception as e:
             print(f"Error sending ACK {ack_num}: {e}")
 
@@ -99,29 +108,45 @@ class Client:
         # This isn't strictly needed for Part 2, but good practice.
         return max(0, MAX_RECV_WINDOW_PACKETS - len(self.receive_buffer))
 
+    def find_first_sack_block(self):
+        """Finds the first block of out-of-order data in the buffer."""
+        if not self.receive_buffer:
+            return 0, 0
+        
+        # Find the block starting with the lowest seq num
+        # This is a simple impl; a real one would find contiguous blocks
+        try:
+            first_key = min(self.receive_buffer.keys())
+            data, flags = self.receive_buffer[first_key]
+            # SACK block is [start_seq, end_seq)
+            return first_key, first_key + len(data)
+        except (ValueError, KeyError):
+             return 0, 0
+
     def process_packet(self, packet):
         """Processes an incoming data packet."""
-        header_data = self.unpack_header(packet)
-        if header_data is None:
+        seq_num, ack_num, flags, sack_start, sack_end, data = self.unpack_header(packet)
+        
+        if seq_num is None:
             return "CONTINUE" # Bad packet
-            
-        seq_num, ack_num, flags = header_data
-        data = packet[HEADER_SIZE:]
         
         # --- Check for EOF ---
         if flags & EOF_FLAG:
-            print(f"Received EOF with Seq={seq_num}")
+            # print(f"Received EOF with Seq={seq_num}")
             # If it's the one we expect
             if seq_num == self.next_expected_seq_num:
                 # Send final ACK (seq_num + 1)
                 self.prepare_ack(seq_num + 1, flags=ACK_FLAG | EOF_FLAG)
+                print("Received EOF, sending final ACK.")
                 return "DONE"
             else:
                 # Got EOF out of order. Store it.
                 if seq_num > self.next_expected_seq_num and seq_num not in self.receive_buffer:
                     self.receive_buffer[seq_num] = (data, flags)
-                # Send ACK for what we are still missing
-                self.prepare_ack(self.next_expected_seq_num)
+                
+                # Send ACK for what we are still missing, with SACK info
+                sack_start_block, sack_end_block = self.find_first_sack_block()
+                self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
                 return "CONTINUE"
 
         # --- Process Data Packet ---
@@ -145,8 +170,9 @@ class Client:
                 self.write_to_txt(buffered_data)
                 self.next_expected_seq_num += len(buffered_data)
             
-            # Send cumulative ACK for the new next_expected
-            self.prepare_ack(self.next_expected_seq_num)
+            # Send cumulative ACK, and include SACK info for any *new* gaps
+            sack_start_block, sack_end_block = self.find_first_sack_block()
+            self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
 
         # 2. Got a packet from the future (out-of-order)
         elif seq_num > self.next_expected_seq_num:
@@ -158,14 +184,16 @@ class Client:
                 else:
                     print("Receive buffer full, dropping packet.")
             
-            # Send duplicate ACK for the packet we're still waiting for
-            self.prepare_ack(self.next_expected_seq_num)
+            # Send duplicate ACK + SACK for the block we just received
+            self.prepare_ack(self.next_expected_seq_num, sack_start=seq_num, sack_end=seq_num + len(data))
 
         # 3. Got a packet from the past (already ACKed)
         else: # seq_num < self.next_expected_seq_num
             # print(f"Received duplicate packet: Seq={seq_num}")
             # Resend ACK for what we've already received
-            self.prepare_ack(self.next_expected_seq_num)
+            # And include SACK info in case the server missed it
+            sack_start_block, sack_end_block = self.find_first_sack_block()
+            self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
 
         return "CONTINUE"
 
@@ -216,16 +244,23 @@ class Client:
         """Closes file and socket."""
         end_time = time.time()
         duration = end_time - self.start_time
+        if duration == 0: duration = 1e-6 # Avoid division by zero
         
         if self.output_file:
             self.output_file.close()
-            file_size = os.path.getsize(self.output_filename)
+            file_size = 0
+            try:
+                file_size = os.path.getsize(self.output_filename)
+            except os.error as e:
+                print(f"Could not get file size: {e}")
+
             print("---------------------------------")
             print("File download complete.")
-            print(f"Duration: {duration:.2f} seconds")
+            if duration > 0.001:
+                print(f"Duration: {duration:.2f} seconds")
             print(f"Saved to: {self.output_filename}")
             print(f"File size: {file_size} bytes")
-            if duration > 0:
+            if duration > 0.001:
                 throughput = (file_size * 8) / (duration * 1_000_000) # Mbps
                 print(f"Avg. Throughput: {throughput:.2f} Mbps")
             print("---------------------------------")
@@ -249,3 +284,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

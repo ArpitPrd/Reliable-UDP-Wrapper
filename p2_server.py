@@ -9,8 +9,10 @@ import os
 # - Sequence Number (I): 4 bytes, unsigned int
 # - ACK Number (I): 4 bytes, unsigned int
 # - Flags (H): 2 bytes, unsigned short (SYN=1, ACK=2, EOF=4)
-# - Reserved (10 bytes): Padding to 20 bytes
-HEADER_FORMAT = "!IIH10x"
+# - SACK Start (I): 4 bytes
+# - SACK End (I): 4 bytes
+# - Padding (2x): 2 bytes
+HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
 MSS_BYTES = 1200  # Max Segment Size (matches assignment)
 PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE  # 1180 bytes
@@ -55,6 +57,9 @@ class Server:
         # --- In-flight Packet Buffer ---
         # {seq_num: (data, send_time, retransmit_count)}
         self.sent_packets = {}
+        
+        # --- SACK State ---
+        self.sacked_packets = set() # Holds seq_nums client has SACKed
 
         # --- Congestion Control Variables ---
         self.cwnd = 1 * PAYLOAD_SIZE  # Start with 1 MSS
@@ -68,16 +73,16 @@ class Server:
         self.rto = INITIAL_RTO
         self.rto_first_measurement = True
 
-    def pack_header(self, seq_num, ack_num, flags):
+    def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         """Packs the header into bytes."""
-        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags)
+        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags, sack_start, sack_end)
 
     def unpack_header(self, packet):
         """Unpacks the header from bytes."""
         try:
             return struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
         except struct.error:
-            return None, None, None
+            return None, None, None, None, None
 
     def update_rto(self, sample_rtt):
         """Updates RTO using Jacobson/Karels algorithm."""
@@ -122,7 +127,8 @@ class Server:
 
     def send_packet(self, seq_num, data, flags=0):
         """Sends a data packet to the client."""
-        header = self.pack_header(seq_num, 0, flags)
+        # Data packets don't send ACKs or SACKs
+        header = self.pack_header(seq_num, 0, flags, 0, 0)
         packet = header + data
         
         try:
@@ -149,7 +155,7 @@ class Server:
             # Update packet info with new send time and incremented count
             self.sent_packets[seq_num] = (data, time.time(), retransmit_count + 1, flags)
             
-            header = self.pack_header(seq_num, 0, flags)
+            header = self.pack_header(seq_num, 0, flags, 0, 0)
             packet = header + data
             
             try:
@@ -159,7 +165,8 @@ class Server:
                 print(f"Error resending packet {seq_num}: {e}")
         else:
             # This can happen if an ACK for it arrived just before resend
-            print(f"Warning: Tried to resend {seq_num}, but it's not in buffer.")
+            # print(f"Warning: Tried to resend {seq_num}, but it's not in buffer.")
+            pass
 
     def find_timeouts(self):
         """Finds and retransmits any timed-out packets."""
@@ -183,15 +190,16 @@ class Server:
         if case == "TLE":
             # Timeout Limit Exceeded
             self.state = STATE_SLOW_START
-            self.ssthresh = self.cwnd / 2
+            self.ssthresh = max(self.cwnd / 2, 2 * PAYLOAD_SIZE)
             self.cwnd = 1 * PAYLOAD_SIZE
             self.dup_ack_count = 0
+            self.sacked_packets.clear() # Clear SACK info on timeout
             print(f"State -> SLOW_START (Timeout). ssthresh={self.ssthresh}, cwnd={self.cwnd}")
 
         elif case == "DUP":
             # 3 Duplicate ACKs (Fast Retransmit)
             self.state = STATE_FAST_RECOVERY
-            self.ssthresh = self.cwnd / 2
+            self.ssthresh = max(self.cwnd / 2, 2 * PAYLOAD_SIZE)
             # Per Reno: set cwnd to ssthresh + 3 MSS
             self.cwnd = self.ssthresh + 3 * PAYLOAD_SIZE
             print(f"State -> FAST_RECOVERY. ssthresh={self.ssthresh}, cwnd={self.cwnd}")
@@ -224,7 +232,6 @@ class Server:
                 self.cwnd += 1 * PAYLOAD_SIZE
                 # print(f"State=FAST_RECOVERY, cwnd inflated to {self.cwnd}")
 
-
     def get_next_content(self):
         """Reads the next chunk of data from the file."""
         start = self.next_seq_num
@@ -255,20 +262,42 @@ class Server:
                 # EOF already sent
                 break
 
+    def resend_missing_packet(self):
+        """SACK-aware retransmission."""
+        # Find the first packet > base_seq_num that is in-flight
+        # but has not been SACKed.
+        
+        # This is a simple linear scan. For high performance,
+        # a more complex data structure would be used.
+        sorted_keys = sorted(self.sent_packets.keys())
+        for seq in sorted_keys:
+            if seq <= self.base_seq_num:
+                continue
+            
+            if seq not in self.sacked_packets:
+                # Found the next missing packet
+                print(f"SACK Resend: Found missing packet {seq}")
+                self.resend_packet(seq)
+                self.sacked_packets.add(seq) # Mark as re-sent
+                return # Only send one per DUP ACK
+
     def process_incoming_ack(self, packet):
         """Processes an incoming ACK packet."""
         header_data = self.unpack_header(packet)
-        if header_data is None or not (header_data[2] & ACK_FLAG):
-            return  # Not an ACK packet
+        if header_data is None:
+            return "CONTINUE"
 
-        seq_num, ack_num, flags = header_data
+        seq_num, cum_ack, flags, sack_start, sack_end = header_data
         
+        if not (flags & ACK_FLAG):
+            return "CONTINUE" # Not an ACK packet
+
         # Check if this is the final ACK for EOF
-        if self.eof_seq_num != -1 and ack_num > self.eof_seq_num:
-            print(f"Got final ACK for EOF (ACK={ack_num}). Transfer complete.")
+        if self.eof_seq_num != -1 and cum_ack > self.eof_seq_num:
+            print(f"Got final ACK for EOF (ACK={cum_ack}). Transfer complete.")
             return "DONE" # Signal completion
 
-        if ack_num > self.base_seq_num:
+        if cum_ack > self.base_seq_num:
             # --- NEW ACK ---
             
             # Calculate RTT sample
@@ -277,23 +306,34 @@ class Server:
                 sample_rtt = time.time() - send_time
                 self.update_rto(sample_rtt)
             
-            # Update cwnd
-            self.update_cwnd(case="NEW_ACK")
-            
             # Update base sequence number
-            self.base_seq_num = ack_num
+            self.base_seq_num = cum_ack
             self.dup_ack_count = 0
 
-            # Clean up sent_packets buffer (remove ACKed packets)
+            # Clean up buffers (remove ACKed packets)
             acked_keys = [k for k in self.sent_packets if k < self.base_seq_num]
             for k in acked_keys:
                 del self.sent_packets[k]
             
-            # Reset the RTO timer for the new base
-            # (Handled by find_timeouts)
-
-        elif ack_num == self.base_seq_num:
+            acked_sack_keys = [k for k in self.sacked_packets if k < self.base_seq_num]
+            for k in acked_sack_keys:
+                self.sacked_packets.remove(k)
+            
+            # Update cwnd (will exit Fast Recovery if in it)
+            self.update_cwnd(case="NEW_ACK")
+            
+        elif cum_ack == self.base_seq_num:
             # --- DUPLICATE ACK ---
+            
+            # Process SACK information
+            if sack_start > 0 and sack_end > sack_start:
+                # print(f"Received SACK block: [{sack_start}, {sack_end})")
+                seq = sack_start
+                while seq < sack_end:
+                    if seq in self.sent_packets:
+                        self.sacked_packets.add(seq)
+                    seq += PAYLOAD_SIZE # Assuming SACK block is packet-aligned
+
             if self.state != STATE_FAST_RECOVERY:
                 self.dup_ack_count += 1
             else:
@@ -302,9 +342,16 @@ class Server:
 
             if self.dup_ack_count == 3:
                 # --- FAST RETRANSMIT ---
-                print(f"3 Duplicate ACKs received for Seq={ack_num}")
-                self.update_cwnd(case="DUP")
-                self.resend_packet(self.base_seq_num)
+                if self.state != STATE_FAST_RECOVERY:
+                    print(f"3 Duplicate ACKs received for Seq={cum_ack}")
+                    self.update_cwnd(case="DUP")
+                    self.resend_packet(self.base_seq_num)
+                    self.sacked_packets.add(self.base_seq_num) # Mark as re-sent
+            
+            if self.state == STATE_FAST_RECOVERY:
+                # SACK logic: resend the next *actually* missing packet
+                self.resend_missing_packet()
+
         
         return "CONTINUE"
 
@@ -352,6 +399,8 @@ class Server:
         # --- Transfer Finished ---
         end_time = time.time()
         duration = end_time - self.start_time
+        if duration == 0: duration = 1e-6 # Avoid division by zero
+        
         throughput = (self.file_size * 8) / (duration * 1_000_000) # Mbps
         print("---------------------------------")
         print("File transfer complete.")
@@ -377,3 +426,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
