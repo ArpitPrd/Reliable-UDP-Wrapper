@@ -3,6 +3,7 @@ import sys
 import time
 import struct
 import os
+import math # Needed for CUBIC
 
 # --- Constants ---
 # Packet Header Format:
@@ -24,8 +25,8 @@ EOF_FLAG = 0x4
 
 # --- Congestion Control States ---
 STATE_SLOW_START = 1
-STATE_CONGESTION_AVOIDANCE = 2
 STATE_FAST_RECOVERY = 3
+STATE_CUBIC_AVOIDANCE = 4 # Replaced Reno's Congestion Avoidance
 
 # --- RTO Calculation Constants ---
 ALPHA = 0.125  # For SRTT
@@ -34,44 +35,61 @@ K = 4.0
 INITIAL_RTO = 1.0  # 1 second
 MIN_RTO = 0.2     # 200ms
 
+# --- CUBIC Constants ---
+BETA_CUBIC = 0.7  # Multiplicative decrease factor
+C_CUBIC = 0.4     # CUBIC growth constant
+
 class Server:
     def __init__(self, ip, port):
         self.ip = ip
         self.port = int(port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((self.ip, self.port))
-        self.socket.settimeout(0.001)  # 1ms timeout for non-blocking loop
+        self.socket.settimeout(0.001) # Non-blocking
+        self.client_addr = None
         print(f"Server started on {self.ip}:{self.port}")
 
-        self.client_addr = None
-        self.file_data = None
+        self.file_data = b""
         self.file_size = 0
-        self.start_time = 0
+        try:
+            with open("data.txt", "rb") as f:
+                self.file_data = f.read()
+            self.file_size = len(self.file_data)
+        except IOError as e:
+            print(f"Error reading data.txt: {e}")
+            sys.exit(1)
 
         # --- Connection State ---
-        self.base_seq_num = 0
-        self.next_seq_num = 0
-        self.eof_seq_num = -1  # Sequence number of the EOF packet
-        self.last_ack_time = 0
-
-        # --- In-flight Packet Buffer ---
-        # {seq_num: (data, send_time, retransmit_count)}
-        self.sent_packets = {}
+        self.next_seq_num = 0       # Next seq num to send
+        self.base_seq_num = 0       # Oldest un-ACKed seq num
+        self.eof_sent_seq = -1      # Seq num of the EOF packet
         
-        # --- SACK State ---
-        self.sacked_packets = set() # Holds seq_nums client has SACKed
-
-        # --- Congestion Control Variables ---
-        self.cwnd = 1 * PAYLOAD_SIZE  # Start with 1 MSS
-        self.ssthresh = 64 * 1024   # 64KB (a common initial value)
+        # --- Congestion Control ---
         self.state = STATE_SLOW_START
-        self.dup_ack_count = 0
-
-        # --- RTO Variables ---
+        self.cwnd_bytes = MSS_BYTES   # Congestion window in bytes
+        self.cwnd_pkts = 1.0          # Congestion window in packets (float)
+        self.ssthresh = 64 * 1024     # Slow Start Threshold (bytes), high initial
+        
+        # --- RTO Calculation ---
+        self.rto = INITIAL_RTO
         self.srtt = 0.0
         self.rttvar = 0.0
-        self.rto = INITIAL_RTO
-        self.rto_first_measurement = True
+        
+        # --- Retransmission Buffer ---
+        # {seq_num: (packet_data, send_time, retrans_count)}
+        self.sent_packets = {}
+        
+        # --- SACK & Fast Recovery ---
+        self.dup_ack_count = 0
+        self.sacked_packets = set() # Set of seq_nums client has SACKed
+        
+        # --- CUBIC State Variables ---
+        self.W_max_pkts = 0.0          # Window size at last congestion event
+        self.t_last_congestion = 0.0   # Time of last congestion event
+        self.K_cubic = 0.0             # Time period for CUBIC to reach W_max
+        
+        self.start_time = 0.0
+        self.last_ack_time = 0.0
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         """Packs the header into bytes."""
@@ -82,305 +100,301 @@ class Server:
         try:
             return struct.unpack(HEADER_FORMAT, packet[:HEADER_SIZE])
         except struct.error:
-            return None, None, None, None, None
+            return None
 
-    def update_rto(self, sample_rtt):
-        """Updates RTO using Jacobson/Karels algorithm."""
-        if self.rto_first_measurement:
-            self.srtt = sample_rtt
-            self.rttvar = sample_rtt / 2.0
-            self.rto_first_measurement = False
+    def update_rto(self, rtt_sample):
+        """Updates RTO using Jacobson's algorithm."""
+        if self.srtt == 0.0:
+            # First sample
+            self.srtt = rtt_sample
+            self.rttvar = rtt_sample / 2.0
         else:
-            self.rttvar = (1 - BETA) * self.rttvar + BETA * abs(self.srtt - sample_rtt)
-            self.srtt = (1 - ALPHA) * self.srtt + ALPHA * sample_rtt
+            # Subsequent samples
+            self.rttvar = (1 - BETA) * self.rttvar + BETA * abs(self.srtt - rtt_sample)
+            self.srtt = (1 - ALPHA) * self.srtt + ALPHA * rtt_sample
         
         self.rto = self.srtt + K * self.rttvar
-        self.rto = max(MIN_RTO, self.rto) # Enforce a minimum RTO
-
-    def load_file(self, filename="data.txt"):
-        """Loads the file to be sent."""
-        try:
-            with open(filename, 'rb') as f:
-                self.file_data = f.read()
-            self.file_size = len(self.file_data)
-            print(f"Loaded {filename}, size: {self.file_size} bytes")
-            return True
-        except FileNotFoundError:
-            print(f"Error: {filename} not found.")
-            return False
-
-    def wait_for_request(self):
-        """Waits for the initial 1-byte file request from a client."""
-        print("Waiting for client request...")
-        while self.client_addr is None:
-            try:
-                data, addr = self.socket.recvfrom(1024)
-                if len(data) == 1:  # Simple 1-byte request
-                    self.client_addr = addr
-                    print(f"Client connected from {self.client_addr}")
-                    if not self.load_file():
-                        self.client_addr = None # Reset if file not found
-            except socket.timeout:
-                continue
-            except Exception as e:
-                print(f"Error waiting for request: {e}")
-
-    def send_packet(self, seq_num, data, flags=0):
-        """Sends a data packet to the client."""
-        # Data packets don't send ACKs or SACKs
-        header = self.pack_header(seq_num, 0, flags, 0, 0)
-        packet = header + data
-        
-        try:
-            self.socket.sendto(packet, self.client_addr)
-            
-            # Store packet for retransmission
-            # Add timestamp for RTO calculation on ACK
-            self.sent_packets[seq_num] = (data, time.time(), 0, flags) 
-            
-            if flags & EOF_FLAG:
-                print(f"Sent EOF: Seq={seq_num}")
-                self.eof_seq_num = seq_num
-            # else:
-            #     print(f"Sent: Seq={seq_num}, Size={len(data)}")
-
-        except Exception as e:
-            print(f"Error sending packet {seq_num}: {e}")
+        self.rto = max(MIN_RTO, self.rto) # Enforce minimum RTO
 
     def resend_packet(self, seq_num):
-        """Resends a packet from the sent_packets buffer."""
+        """Resends a specific packet from the buffer."""
         if seq_num in self.sent_packets:
-            data, _, retransmit_count, flags = self.sent_packets[seq_num]
+            packet_data, send_time, retrans_count = self.sent_packets[seq_num]
             
-            # Update packet info with new send time and incremented count
-            self.sent_packets[seq_num] = (data, time.time(), retransmit_count + 1, flags)
-            
-            header = self.pack_header(seq_num, 0, flags, 0, 0)
-            packet = header + data
-            
-            try:
-                self.socket.sendto(packet, self.client_addr)
-                print(f"Resent: Seq={seq_num} (Count={retransmit_count+1})")
-            except Exception as e:
-                print(f"Error resending packet {seq_num}: {e}")
-        else:
-            # This can happen if an ACK for it arrived just before resend
-            # print(f"Warning: Tried to resend {seq_num}, but it's not in buffer.")
-            pass
+            if retrans_count > 10:
+                print("Packet resend limit reached. Aborting.")
+                return False # Failed
 
-    def find_timeouts(self):
-        """Finds and retransmits any timed-out packets."""
-        now = time.time()
-        # Find the oldest un-ACKed packet
-        if self.base_seq_num in self.sent_packets:
-            _, send_time, _, _ = self.sent_packets[self.base_seq_num]
-            
-            if now - send_time > self.rto:
-                # --- TIMEOUT ---
-                print(f"Timeout detected for Seq={self.base_seq_num}. RTO={self.rto:.3f}s")
-                self.update_cwnd(case="TLE")
-                self.resend_packet(self.base_seq_num)
-                # Double the RTO for the next check (exponential backoff)
-                self.rto = min(self.rto * 2, 60.0) # Cap at 60s
-                # Reset RTO calculation
-                self.rto_first_measurement = True
-
-    def update_cwnd(self, case):
-        """Updates cwnd and ssthresh based on the event (Reno-like)."""
-        if case == "TLE":
-            # Timeout Limit Exceeded
-            self.state = STATE_SLOW_START
-            self.ssthresh = max(self.cwnd / 2, 2 * PAYLOAD_SIZE)
-            self.cwnd = 1 * PAYLOAD_SIZE
-            self.dup_ack_count = 0
-            self.sacked_packets.clear() # Clear SACK info on timeout
-            print(f"State -> SLOW_START (Timeout). ssthresh={self.ssthresh}, cwnd={self.cwnd}")
-
-        elif case == "DUP":
-            # 3 Duplicate ACKs (Fast Retransmit)
-            self.state = STATE_FAST_RECOVERY
-            self.ssthresh = max(self.cwnd / 2, 2 * PAYLOAD_SIZE)
-            # Per Reno: set cwnd to ssthresh + 3 MSS
-            self.cwnd = self.ssthresh + 3 * PAYLOAD_SIZE
-            print(f"State -> FAST_RECOVERY. ssthresh={self.ssthresh}, cwnd={self.cwnd}")
-            # Resend is handled in process_incoming_ack
-
-        elif case == "NEW_ACK":
-            # New ACK received
-            if self.state == STATE_SLOW_START:
-                self.cwnd += 1 * PAYLOAD_SIZE
-                # print(f"State=SLOW_START, cwnd increased to {self.cwnd}")
-                if self.cwnd >= self.ssthresh:
-                    self.state = STATE_CONGESTION_AVOIDANCE
-                    print(f"State -> CONGESTION_AVOIDANCE. ssthresh={self.ssthresh}, cwnd={self.cwnd}")
-            
-            elif self.state == STATE_CONGESTION_AVOIDANCE:
-                # Additive Increase: ~1 MSS per RTT
-                self.cwnd += (1 * PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd
-                # print(f"State=CONGESTION_AVOIDANCE, cwnd increased to {self.cwnd}")
-
-            elif self.state == STATE_FAST_RECOVERY:
-                # Deflate window back to ssthresh
-                self.cwnd = self.ssthresh
-                self.state = STATE_CONGESTION_AVOIDANCE
-                self.dup_ack_count = 0
-                print(f"State -> CONGESTION_AVOIDANCE (Exiting Fast Recovery). cwnd={self.cwnd}")
-        
-        elif case == "INFLATE":
-            # In Fast Recovery, inflate window for each extra dup ACK
-            if self.state == STATE_FAST_RECOVERY:
-                self.cwnd += 1 * PAYLOAD_SIZE
-                # print(f"State=FAST_RECOVERY, cwnd inflated to {self.cwnd}")
-
-    def get_next_content(self):
-        """Reads the next chunk of data from the file."""
-        start = self.next_seq_num
-        end = start + PAYLOAD_SIZE
-        if start >= self.file_size:
-            return None  # No more data
-        
-        data = self.file_data[start:end]
-        return data
-
-    def send_new_data(self):
-        """Sends new data packets based on cwnd."""
-        # Send packets as long as the window allows
-        # (next_seq_num < base_seq_num + cwnd)
-        while (self.next_seq_num < self.base_seq_num + self.cwnd) and (self.eof_seq_num == -1):
-            
-            data = self.get_next_content()
-            
-            if data:
-                # Send data packet
-                self.send_packet(self.next_seq_num, data, flags=0)
-                self.next_seq_num += len(data)
-            elif self.eof_seq_num == -1:
-                # No more data, send EOF
-                self.send_packet(self.next_seq_num, b'EOF', flags=EOF_FLAG)
-                break # Stop sending after EOF
-            else:
-                # EOF already sent
-                break
+            # print(f"Resending packet: Seq={seq_num} (RTO={self.rto:.2f}s)")
+            self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
+            self.socket.sendto(packet_data, self.client_addr)
+            return True # Success
+        return False
 
     def resend_missing_packet(self):
-        """SACK-aware retransmission."""
-        # Find the first packet > base_seq_num that is in-flight
-        # but has not been SACKed.
+        """SACK-aware retransmission (for Fast Recovery)."""
+        # Find the first packet that is un-ACKed (>= base) and not SACKed
+        for seq_num in sorted(self.sent_packets.keys()):
+            if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
+                # print(f"Fast Retransmit (SACK): Resending {seq_num}")
+                self.resend_packet(seq_num)
+                return
+        # print("Fast Retransmit: No non-SACKed packets to send.")
+
+    def find_timeouts(self):
+        """Checks for and retransmits timed-out packets."""
+        now = time.time()
+        packets_to_resend = []
+        for seq_num, (packet, send_time, retrans_count) in self.sent_packets.items():
+            if now - send_time > self.rto:
+                packets_to_resend.append(seq_num)
+
+        if not packets_to_resend:
+            return
+
+        # Only process the oldest timed-out packet
+        oldest_seq_num = min(packets_to_resend)
+        # print(f"Timeout detected for packet: Seq={oldest_seq_num}")
         
-        # This is a simple linear scan. For high performance,
-        # a more complex data structure would be used.
-        sorted_keys = sorted(self.sent_packets.keys())
-        for seq in sorted_keys:
-            if seq <= self.base_seq_num:
-                continue
+        if not self.resend_packet(oldest_seq_num):
+             # Failed to resend, might be a closed connection
+            return
+
+        # --- Handle RTO Event (CUBIC) ---
+        # This is a full timeout, the most severe congestion signal.
+        # We reset CUBIC's memory and enter Slow Start.
+        if self.state != STATE_SLOW_START:
+            print("Timeout (RTO). Entering Slow Start.")
+            self.state = STATE_SLOW_START
             
-            if seq not in self.sacked_packets:
-                # Found the next missing packet
-                print(f"SACK Resend: Found missing packet {seq}")
-                self.resend_packet(seq)
-                self.sacked_packets.add(seq) # Mark as re-sent
-                return # Only send one per DUP ACK
+            # CUBIC: Reset memory
+            self.W_max_pkts = 0.0
+            self.t_last_congestion = 0.0
+            self.K_cubic = 0.0
+            
+            # Reno-style ssthresh reduction
+            self.ssthresh = max(2 * PAYLOAD_SIZE, self.cwnd_bytes / 2)
+        
+        # Reset cwnd to 1 MSS
+        self.cwnd_pkts = 1.0
+        self.cwnd_bytes = self.cwnd_pkts * PAYLOAD_SIZE
+        
+        # Double the RTO (Karn's Algorithm / Exponential Backoff)
+        self.rto = min(self.rto * 2, 60.0) # Cap at 60s
+        self.dup_ack_count = 0
+
+
+    def get_next_content(self):
+        """Gets the next chunk of file data to send."""
+        if self.next_seq_num < self.file_size:
+            start = self.next_seq_num
+            end = min(start + PAYLOAD_SIZE, self.file_size)
+            data = self.file_data[start:end]
+            seq_num = start
+            self.next_seq_num = end
+            return data, seq_num, 0
+        
+        elif self.eof_sent_seq == -1: # File done, EOF not yet sent
+            self.eof_sent_seq = self.file_size
+            return b"EOF", self.eof_sent_seq, EOF_FLAG
+        
+        else: # File and EOF already sent
+            return None, -1, 0
+
+    def send_new_data(self):
+        """Sends new data packets as allowed by cwnd."""
+        # 'inflight' is bytes currently un-ACKed
+        inflight = self.next_seq_num - self.base_seq_num
+        
+        while inflight < self.cwnd_bytes:
+            data, seq_num, flags = self.get_next_content()
+            
+            if data is None:
+                break # No more data to send
+            
+            header = self.pack_header(seq_num, 0, flags)
+            packet = header + data
+            
+            self.socket.sendto(packet, self.client_addr)
+            self.sent_packets[seq_num] = (packet, time.time(), 0)
+            
+            if flags & EOF_FLAG:
+                # print(f"Sent EOF: Seq={seq_num}")
+                break # Don't send more after EOF
+                
+            inflight = self.next_seq_num - self.base_seq_num
 
     def process_incoming_ack(self, packet):
-        """Processes an incoming ACK packet."""
-        header_data = self.unpack_header(packet)
-        if header_data is None:
-            return "CONTINUE"
-
-        seq_num, cum_ack, flags, sack_start, sack_end = header_data
+        """Handles an incoming ACK from the client."""
+        header_fields = self.unpack_header(packet)
+        if header_fields is None:
+            return # Malformed packet
+            
+        seq_num, cum_ack, flags, sack_start, sack_end = header_fields
         
         if not (flags & ACK_FLAG):
-            return "CONTINUE" # Not an ACK packet
+            return # Not an ACK packet
+            
+        self.last_ack_time = time.time()
+        
+        # --- SACK Processing ---
+        if sack_start > 0 and sack_end > sack_start:
+            # Client has SACKed the block [sack_start, sack_end)
+            # We can mark all packets in this range as "SACKed"
+            seq = sack_start
+            while seq < sack_end:
+                if seq in self.sent_packets:
+                    self.sacked_packets.add(seq)
+                seq += PAYLOAD_SIZE # Note: Assumes fixed-size packets
+            # print(f"Received SACK for [{sack_start}, {sack_end})")
 
-        # Check if this is the final ACK for EOF
-        if self.eof_seq_num != -1 and cum_ack > self.eof_seq_num:
-            print(f"Got final ACK for EOF (ACK={cum_ack}). Transfer complete.")
-            return "DONE" # Signal completion
-
-        if cum_ack > self.base_seq_num:
-            # --- NEW ACK ---
-            
-            # Calculate RTT sample
-            if self.base_seq_num in self.sent_packets:
-                _, send_time, _, _ = self.sent_packets[self.base_seq_num]
-                sample_rtt = time.time() - send_time
-                self.update_rto(sample_rtt)
-            
-            # Update base sequence number
-            self.base_seq_num = cum_ack
-            self.dup_ack_count = 0
-
-            # Clean up buffers (remove ACKed packets)
-            acked_keys = [k for k in self.sent_packets if k < self.base_seq_num]
-            for k in acked_keys:
-                del self.sent_packets[k]
-            
-            acked_sack_keys = [k for k in self.sacked_packets if k < self.base_seq_num]
-            for k in acked_sack_keys:
-                self.sacked_packets.remove(k)
-            
-            # Update cwnd (will exit Fast Recovery if in it)
-            self.update_cwnd(case="NEW_ACK")
-            
-        elif cum_ack == self.base_seq_num:
-            # --- DUPLICATE ACK ---
-            
-            # Process SACK information
-            if sack_start > 0 and sack_end > sack_start:
-                # print(f"Received SACK block: [{sack_start}, {sack_end})")
-                seq = sack_start
-                while seq < sack_end:
-                    if seq in self.sent_packets:
-                        self.sacked_packets.add(seq)
-                    seq += PAYLOAD_SIZE # Assuming SACK block is packet-aligned
-
+        # --- 1. Duplicate ACK ---
+        if cum_ack == self.base_seq_num:
             if self.state != STATE_FAST_RECOVERY:
                 self.dup_ack_count += 1
-            else:
-                # We are in Fast Recovery, inflate window
-                self.update_cwnd(case="INFLATE")
-
-            if self.dup_ack_count == 3:
-                # --- FAST RETRANSMIT ---
-                if self.state != STATE_FAST_RECOVERY:
-                    print(f"3 Duplicate ACKs received for Seq={cum_ack}")
-                    self.update_cwnd(case="DUP")
-                    self.resend_packet(self.base_seq_num)
-                    self.sacked_packets.add(self.base_seq_num) # Mark as re-sent
             
-            if self.state == STATE_FAST_RECOVERY:
-                # SACK logic: resend the next *actually* missing packet
-                self.resend_missing_packet()
+            # --- 3 DUP-ACKs: Enter Fast Recovery ---
+            if self.dup_ack_count == 3 and self.state != STATE_FAST_RECOVERY:
+                print("3 Dup-ACKs. Entering Fast Recovery.")
+                
+                # --- CUBIC Congestion Event ---
+                # This is a "Fast Retransmit" event
+                self.state = STATE_FAST_RECOVERY
+                self.t_last_congestion = time.time()
+                
+                # Store the window size where we experienced loss
+                self.W_max_pkts = self.cwnd_pkts
+                
+                # Calculate K (time to grow back to W_max)
+                self.K_cubic = (self.W_max_pkts * (1.0 - BETA_CUBIC) / C_CUBIC)**(1.0/3.0)
 
+                # Set new ssthresh and cwnd (Multiplicative Decrease)
+                self.ssthresh = max(2 * PAYLOAD_SIZE, self.cwnd_pkts * BETA_CUBIC * PAYLOAD_SIZE)
+                self.cwnd_pkts = self.cwnd_pkts * BETA_CUBIC
+                self.cwnd_bytes = self.cwnd_pkts * PAYLOAD_SIZE
+
+                self.resend_missing_packet() # Resend the missing packet
+            
+            # --- In Fast Recovery ---
+            elif self.state == STATE_FAST_RECOVERY:
+                # Every subsequent DUP ACK, send the next SACKed packet
+                self.resend_missing_packet()
+            
+            return # End processing for DUP ACK
+
+        # --- 2. New ACK (Data is Acknowledged) ---
+        if cum_ack > self.base_seq_num:
+            self.dup_ack_count = 0
+            
+            # Calculate RTT sample
+            # Find the packet this ACK is for (cum_ack - 1)
+            # This is tricky. Let's find the RTT for the *newest* packet ACKed
+            ack_rtt_sample = -1
+            newly_acked_packets = []
+            for seq in list(self.sent_packets.keys()):
+                 if seq < cum_ack:
+                    newly_acked_packets.append(seq)
+            
+            if newly_acked_packets:
+                newest_acked_seq = max(newly_acked_packets)
+                packet_data, send_time, retrans_count = self.sent_packets[newest_acked_seq]
+                
+                # Only use RTT sample if it wasn't retransmitted (Karn's)
+                if retrans_count == 0:
+                    ack_rtt_sample = time.time() - send_time
+                    self.update_rto(ack_rtt_sample)
+
+            # Clean up sent_packets buffer
+            for seq_num in newly_acked_packets:
+                del self.sent_packets[seq_num]
+                self.sacked_packets.discard(seq_num) # Remove from SACK set too
+
+            # Update base
+            self.base_seq_num = cum_ack
+            
+            # --- Update CWND ---
+            if self.state == STATE_SLOW_START:
+                # Exponential growth
+                self.cwnd_pkts += 1.0
+                self.cwnd_bytes = self.cwnd_pkts * PAYLOAD_SIZE
+                
+                # Check for transition to CUBIC Avoidance
+                if self.cwnd_bytes >= self.ssthresh:
+                    self.state = STATE_CUBIC_AVOIDANCE
+                    
+                    # --- CUBIC Transition ---
+                    # Start the CUBIC clock from here
+                    self.t_last_congestion = time.time()
+                    self.W_max_pkts = self.cwnd_pkts # Our "peak" is where SS ends
+                    self.K_cubic = 0.0             # We are *at* W_max, so t-K=0
+            
+            elif self.state == STATE_CUBIC_AVOIDANCE:
+                # --- CUBIC Growth Function ---
+                t_now = time.time()
+                t_elapsed = t_now - self.t_last_congestion
+                
+                # Target window based on cubic function
+                W_target_pkts = (self.C_cubic * ((t_elapsed - self.K_cubic)**3)) + self.W_max_pkts
+                
+                # We need to grow from current cwnd to W_target over one RTT.
+                # Per-ACK growth is (W_target - cwnd) / cwnd.
+                if W_target_pkts > self.cwnd_pkts:
+                    # Convex growth (probing)
+                    increment = (W_target_pkts - self.cwnd_pkts) / self.cwnd_pkts
+                    self.cwnd_pkts += increment
+                else:
+                    # Concave growth (TCP-friendly region)
+                    # Grow slowly, similar to Reno
+                    self.cwnd_pkts += (1.0 / self.cwnd_pkts)
+                
+                self.cwnd_bytes = self.cwnd_pkts * PAYLOAD_SIZE
+
+            elif self.state == STATE_FAST_RECOVERY:
+                # This ACK ends Fast Recovery
+                self.state = STATE_CUBIC_AVOIDANCE
+                # CUBIC state (W_max, K, t_last_congestion) was already
+                # set when we *entered* Fast Recovery.
+                # We just transition and start growing from the reduced cwnd.
+                self.cwnd_pkts = self.ssthresh / PAYLOAD_SIZE
+                self.cwnd_bytes = self.ssthresh
+
+            # Check if this ACK is the final EOF ACK
+            if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
+                print("Final EOF ACK received.")
+                return "DONE"
         
         return "CONTINUE"
 
 
     def run(self):
         """Main server loop."""
-        self.wait_for_request()
-        if self.client_addr is None:
-            print("Server shutting down (no client).")
+        
+        # 1. Wait for initial client request
+        try:
+            print("Waiting for client request...")
+            packet, self.client_addr = self.socket.recvfrom(1024)
+            print(f"Client connected from {self.client_addr}")
+        except Exception as e:
+            print(f"Error receiving initial request: {e}")
+            self.socket.close()
             return
-
-        print("Starting file transfer...")
+            
         self.start_time = time.time()
         self.last_ack_time = self.start_time
-        
         running = True
+        
         while running:
             # 1. Check for incoming ACKs
             try:
-                ack_data, _ = self.socket.recvfrom(1024)
-                self.last_ack_time = time.time()
-                result = self.process_incoming_ack(ack_data)
-                if result == "DONE":
+                ack_packet, _ = self.socket.recvfrom(MSS_BYTES)
+                if self.process_incoming_ack(ack_packet) == "DONE":
                     running = False
+                    
             except socket.timeout:
                 pass  # No ACK, continue
             except Exception as e:
-                print(f"Error receiving ACK: {e}")
-                time.sleep(0.01)
+                # print(f"Error receiving ACK: {e}")
+                time.sleep(0.001)
 
             if not running:
                 break
@@ -396,7 +410,7 @@ class Server:
                 print("Client timed out (10s). Shutting down.")
                 running = False
 
-        # --- Transfer Finished ---
+        # --- Transfer Finished ---\
         end_time = time.time()
         duration = end_time - self.start_time
         if duration == 0: duration = 1e-6 # Avoid division by zero
