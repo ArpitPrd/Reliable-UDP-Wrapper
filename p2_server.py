@@ -68,7 +68,12 @@ class Server:
         self.state = STATE_SLOW_START
         self.cwnd_bytes = MSS_BYTES   # Congestion window in bytes
         self.cwnd_pkts = 1.0          # Congestion window in packets (float)
-        self.ssthresh = 64 * 1024     # Slow Start Threshold (bytes), high initial
+        
+        # Set ssthresh to a very large value (effectively "infinity")
+        # It will be set properly after the first congestion event.
+        # This forces CUBIC to stay in Slow Start until it finds the *real*
+        # bottleneck, which is the correct behavior.
+        self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
         
         # --- RTO Calculation ---
         self.rto = INITIAL_RTO
@@ -297,16 +302,20 @@ class Server:
             
             if newly_acked_packets:
                 newest_acked_seq = max(newly_acked_packets)
-                packet_data, send_time, retrans_count = self.sent_packets[newest_acked_seq]
-                
-                # Only use RTT sample if it wasn't retransmitted (Karn's)
-                if retrans_count == 0:
-                    ack_rtt_sample = time.time() - send_time
-                    self.update_rto(ack_rtt_sample)
+                # Check if the newest acked packet is still in sent_packets
+                # It might have been deleted by a previous ACK
+                if newest_acked_seq in self.sent_packets:
+                    packet_data, send_time, retrans_count = self.sent_packets[newest_acked_seq]
+                    
+                    # Only use RTT sample if it wasn't retransmitted (Karn's)
+                    if retrans_count == 0:
+                        ack_rtt_sample = time.time() - send_time
+                        self.update_rto(ack_rtt_sample)
 
             # Clean up sent_packets buffer
             for seq_num in newly_acked_packets:
-                del self.sent_packets[seq_num]
+                if seq_num in self.sent_packets:
+                    del self.sent_packets[seq_num]
                 self.sacked_packets.discard(seq_num) # Remove from SACK set too
 
             # Update base
@@ -322,11 +331,13 @@ class Server:
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CUBIC_AVOIDANCE
                     
-                    # --- CUBIC Transition ---
-                    # Start the CUBIC clock from here
+                    # --- CUBIC Transition (from SS, no loss) ---
+                    # This should rarely happen if ssthresh is "infinite"
+                    # But if it does, we start CUBIC from here.
                     self.t_last_congestion = time.time()
                     self.W_max_pkts = self.cwnd_pkts # Our "peak" is where SS ends
-                    self.K_cubic = 0.0             # We are *at* W_max, so t-K=0
+                    # K_cubic = 0 means we are at W_max right now
+                    self.K_cubic = 0.0             
             
             elif self.state == STATE_CUBIC_AVOIDANCE:
                 # --- CUBIC Growth Function ---
