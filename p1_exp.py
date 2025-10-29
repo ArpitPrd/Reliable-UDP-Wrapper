@@ -55,7 +55,7 @@ def run(expname):
 
     SERVER_IP = "10.0.0.1"
     SERVER_PORT = 6555
-    SWS = 5
+    SWS = 5 * 1180
             
     NUM_ITERATIONS = 5 
     OUTFILE = 'received_data.txt'
