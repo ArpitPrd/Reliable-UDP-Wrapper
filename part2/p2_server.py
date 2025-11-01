@@ -161,8 +161,15 @@ class Server:
         plt.plot(timestamps, cwnds_kb, label='cwnd (KB)', drawstyle='steps-post')
         plt.plot(timestamps, ssthreshs_kb, label='ssthresh (KB)', linestyle='--', color='gray', drawstyle='steps-post')
         
-        # Add vertical spans for states
-        state_colors = {'SS': 'rgba(255, 0, 0, 0.1)', 'CA': 'rgba(0, 255, 0, 0.1)', 'FR': 'rgba(0, 0, 255, 0.1)'}
+        # --- [FIX] Use float tuples for RGBA colors ---
+        # The 'rgba(r,g,b,a)' string format is not supported by all
+        # matplotlib versions (especially older system-installed ones).
+        # A float tuple (R, G, B, A) is universally supported.
+        state_colors = {
+            'SS': (1.0, 0.0, 0.0, 0.1), # Red
+            'CA': (0.0, 1.0, 0.0, 0.1), # Green
+            'FR': (0.0, 0.0, 1.0, 0.1)  # Blue
+        }
         
         if states: # Only plot states if data exists
             last_state = states[0]
@@ -170,11 +177,12 @@ class Server:
             
             for i in range(1, len(timestamps)):
                 if states[i] != last_state:
-                    plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
+                    # Use the corrected tuple format here
+                    plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, (0.0, 0.0, 0.0, 0.1)), alpha=1.0)
                     start_time = timestamps[i]
                     last_state = states[i]
             # Add the last span
-            plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
+            plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, (0.0, 0.0, 0.0, 0.1)), alpha=1.0)
         
         # Create dummy plots for legend if states were present
         if states:
