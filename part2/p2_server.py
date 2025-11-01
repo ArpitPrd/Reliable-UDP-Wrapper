@@ -63,6 +63,9 @@ class Server:
         self.base_seq_num = 0       # Oldest un-ACKed seq num
         self.eof_sent_seq = -1      # Seq num of the EOF packet
         
+        # --- [FIX] Add connection status flag ---
+        self.connection_dead = False
+        
         # --- Congestion Control (Reno) ---
         self.state = STATE_SLOW_START
         self.cwnd_bytes = MSS_BYTES   # Congestion window in bytes
@@ -233,8 +236,24 @@ class Server:
 
             # print(f"Resending packet: Seq={seq_num} (RTO={self.rto:.2f}s)")
             self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
-            self.socket.sendto(packet_data, self.client_addr)
-            return True # Success
+            
+            # --- [FIX] Add try/except block to catch OSError ---
+            try:
+                self.socket.sendto(packet_data, self.client_addr)
+                return True # Success
+            except OSError as e:
+                # 101: Network is unreachable, 111: Connection refused, 113: No route to host
+                if e.errno in [101, 111, 113]: 
+                    print(f"Client unreachable on resend: {e}. Aborting transfer.")
+                    self.connection_dead = True
+                    return False # Failed
+                else:
+                    raise # Re-raise other OSErrors
+            except Exception as e:
+                print(f"Error in resend_packet: {e}")
+                self.connection_dead = True
+                return False
+                
         return False
 
     def resend_missing_packet(self):
@@ -309,6 +328,10 @@ class Server:
         inflight = self.next_seq_num - self.base_seq_num
         
         while inflight < self.cwnd_bytes:
+            # --- [FIX] Check connection status ---
+            if self.connection_dead:
+                break
+                
             data, seq_num, flags = self.get_next_content()
             
             if data is None:
@@ -317,8 +340,22 @@ class Server:
             header = self.pack_header(seq_num, 0, flags)
             packet = header + data
             
-            self.socket.sendto(packet, self.client_addr)
-            self.sent_packets[seq_num] = (packet, time.time(), 0)
+            # --- [FIX] Add try/except block to catch OSError ---
+            try:
+                self.socket.sendto(packet, self.client_addr)
+                self.sent_packets[seq_num] = (packet, time.time(), 0)
+            except OSError as e:
+                # 101: Network is unreachable, 111: Connection refused, 113: No route to host
+                if e.errno in [101, 111, 113]:
+                    print(f"Client unreachable on send: {e}. Aborting transfer.")
+                    self.connection_dead = True
+                    break # Exit the send loop
+                else:
+                    raise # Re-raise other OSErrors
+            except Exception as e:
+                print(f"Error in send_new_data: {e}")
+                self.connection_dead = True
+                break # Exit the send loop
             
             if flags & EOF_FLAG:
                 # print(f"Sent EOF: Seq={seq_num}")
@@ -494,6 +531,12 @@ class Server:
         running = True
         
         while running:
+            # --- [FIX] Check connection status at start of loop ---
+            if self.connection_dead:
+                print("Connection dead, shutting down.")
+                running = False
+                break
+                
             # 1. Check for incoming ACKs
             try:
                 ack_packet, _ = self.socket.recvfrom(MSS_BYTES)
