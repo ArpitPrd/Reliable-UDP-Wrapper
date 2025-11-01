@@ -43,7 +43,8 @@ class Server:
         self.port = int(port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((self.ip, self.port))
-        self.socket.settimeout(0.001) # Non-blocking
+        # REMOVE THE TIMEOUT FROM HERE
+        # self.socket.settimeout(0.001) # Non-blocking
         self.client_addr = None
         print(f"Server started on {self.ip}:{self.port}")
 
@@ -443,11 +444,15 @@ class Server:
     def run(self):
         """Main server loop."""
         
-        # 1. Wait for initial client request
+        # 1. Wait for initial client request (this will now be blocking)
         try:
             print("Waiting for client request...")
             packet, self.client_addr = self.socket.recvfrom(1024)
             print(f"Client connected from {self.client_addr}")
+            
+            # --- [FIX] SET THE NON-BLOCKING TIMEOUT *AFTER* THE FIRST PACKET ---
+            self.socket.settimeout(0.001)
+            
         except Exception as e:
             print(f"Error receiving initial request: {e}")
             self.socket.close()
@@ -460,7 +465,7 @@ class Server:
         try:
             self.cwnd_log_file = open(self.log_filename, "w", buffering=1) # line-buffered
             self.cwnd_log_file.write("timestamp_s,cwnd_bytes,ssthresh_bytes,state\n")
-            print(f"#################################Logging CWND to {self.log_filename}")
+            print(f"Logging CWND to {self.log_filename}")
             # Log the initial state
             self.log_cwnd()
         except IOError as e:
@@ -533,3 +538,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
