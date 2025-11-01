@@ -124,7 +124,7 @@ class Server:
             import matplotlib.pyplot as plt
         except ImportError:
             print("\n[Plotting] Matplotlib not found. Skipping plot generation.")
-            print("To install: pip install matplotlib")
+            print("To install: sudo apt-get install python3-matplotlib (or pip3 install matplotlib)")
             return
 
         timestamps = []
@@ -160,21 +160,36 @@ class Server:
         
         # Add vertical spans for states
         state_colors = {'SS': 'rgba(255, 0, 0, 0.1)', 'CA': 'rgba(0, 255, 0, 0.1)', 'FR': 'rgba(0, 0, 255, 0.1)'}
-        last_state = states[0]
-        start_time = timestamps[0]
         
-        for i in range(1, len(timestamps)):
-            if states[i] != last_state:
-                plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
-                start_time = timestamps[i]
-                last_state = states[i]
-        # Add the last span
-        plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0, label="State (SS/CA/FR)")
+        if states: # Only plot states if data exists
+            last_state = states[0]
+            start_time = timestamps[0]
+            
+            for i in range(1, len(timestamps)):
+                if states[i] != last_state:
+                    plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
+                    start_time = timestamps[i]
+                    last_state = states[i]
+            # Add the last span
+            plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
+        
+        # Create dummy plots for legend if states were present
+        if states:
+            handles, labels = plt.gca().get_legend_handles_labels()
+            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['SS']))
+            labels.append('Slow Start (SS)')
+            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['CA']))
+            labels.append('Congestion Avoidance (CA)')
+            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['FR']))
+            labels.append('Fast Recovery (FR)')
+            plt.legend(handles, labels)
+        else:
+            plt.legend()
+
 
         plt.xlabel('Time (seconds)')
         plt.ylabel('Window Size (KB)')
         plt.title(f'Congestion Window (cwnd) over Time - Port {self.port}')
-        plt.legend()
         plt.grid(True)
         plt.tight_layout()
         
@@ -360,7 +375,10 @@ class Server:
             elif self.state == STATE_FAST_RECOVERY:
                 # Inflate window for each subsequent DUP ACK
                 self.cwnd_bytes += PAYLOAD_SIZE
-                self.resend_missing_packet()
+                
+                # --- [FIX] DO NOT resend on every dup ack. ---
+                # This was causing the "Packet resend limit" error.
+                # self.resend_missing_packet()
             
             # --- [NEW] Log if state changed ---
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
@@ -415,8 +433,9 @@ class Server:
                 # Use a float accumulator (self.ack_credits) to sum
                 # fractional increments: (MSS * MSS) / cwnd
                 
-                increment_frac = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
-                self.ack_credits += increment_frac
+                if self.cwnd_bytes > 0: # Avoid division by zero
+                    increment_frac = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                    self.ack_credits += increment_frac
                 
                 if self.ack_credits >= 1.0:
                     int_increment = int(self.ack_credits)
