@@ -4,6 +4,7 @@ import time
 import struct
 import os
 import math # Not needed for Reno, but safe to keep
+import csv # For logging
 
 # --- Constants ---
 # Packet Header Format:
@@ -82,6 +83,103 @@ class Server:
         
         self.start_time = 0.0
         self.last_ack_time = 0.0
+        
+        # --- [FIX] Additive Increase Accumulator ---
+        self.ack_credits = 0.0
+
+        # --- [NEW] CWND Logging ---
+        self.cwnd_log_file = None
+        self.log_filename = f"cwnd_log_{self.port}.csv"
+
+    def get_state_str(self):
+        """Helper function to get a string for the current state."""
+        if self.state == STATE_SLOW_START:
+            return "SS"
+        if self.state == STATE_CONGESTION_AVOIDANCE:
+            return "CA"
+        if self.state == STATE_FAST_RECOVERY:
+            return "FR"
+        return "UNK"
+
+    def log_cwnd(self):
+        """Logs the current cwnd, ssthresh, and state to the log file."""
+        if not self.cwnd_log_file:
+            return
+        
+        try:
+            timestamp = time.time() - self.start_time
+            state_str = self.get_state_str()
+            # Log: timestamp, cwnd_bytes, ssthresh_bytes, state
+            self.cwnd_log_file.write(f"{timestamp:.4f},{int(self.cwnd_bytes)},{int(self.ssthresh)},{state_str}\n")
+        except Exception as e:
+            print(f"Error writing to log: {e}")
+
+    def plot_cwnd(self, log_filename):
+        """Tries to plot the CWND log file using matplotlib."""
+        try:
+            # Import here so matplotlib is not a hard dependency
+            import matplotlib
+            matplotlib.use('Agg') # Use non-GUI backend (for servers)
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("\n[Plotting] Matplotlib not found. Skipping plot generation.")
+            print("To install: pip install matplotlib")
+            return
+
+        timestamps = []
+        cwnds_kb = []
+        ssthreshs_kb = []
+        states = []
+        
+        try:
+            with open(log_filename, 'r') as f:
+                reader = csv.reader(f)
+                next(reader) # Skip header
+                for row in reader:
+                    timestamps.append(float(row[0]))
+                    cwnds_kb.append(float(row[1]) / 1024.0)
+                    ssthreshs_kb.append(float(row[2]) / 1024.0)
+                    states.append(row[3])
+        except Exception as e:
+            print(f"Error reading log file for plotting: {e}")
+            return
+
+        if not timestamps:
+            print("[Plotting] No data to plot.")
+            return
+
+        plot_filename = f"cwnd_plot_{self.port}.png"
+        
+        plt.figure(figsize=(12, 6))
+        
+        # Plot cwnd (line) and ssthresh (dashed)
+        # Use drawstyle='steps-post' to show the window changes as blocks
+        plt.plot(timestamps, cwnds_kb, label='cwnd (KB)', drawstyle='steps-post')
+        plt.plot(timestamps, ssthreshs_kb, label='ssthresh (KB)', linestyle='--', color='gray', drawstyle='steps-post')
+        
+        # Add vertical spans for states
+        state_colors = {'SS': 'rgba(255, 0, 0, 0.1)', 'CA': 'rgba(0, 255, 0, 0.1)', 'FR': 'rgba(0, 0, 255, 0.1)'}
+        last_state = states[0]
+        start_time = timestamps[0]
+        
+        for i in range(1, len(timestamps)):
+            if states[i] != last_state:
+                plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0)
+                start_time = timestamps[i]
+                last_state = states[i]
+        # Add the last span
+        plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, 'rgba(0,0,0,0.1)'), alpha=1.0, label="State (SS/CA/FR)")
+
+        plt.xlabel('Time (seconds)')
+        plt.ylabel('Window Size (KB)')
+        plt.title(f'Congestion Window (cwnd) over Time - Port {self.port}')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        
+        plt.savefig(plot_filename)
+        print(f"[Plotting] CWND plot saved to {plot_filename}")
+
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         """Packs the header into bytes."""
@@ -168,6 +266,9 @@ class Server:
         self.rto = min(self.rto * 2, 60.0) # Cap at 60s
         self.dup_ack_count = 0
 
+        # --- [NEW] Log the change ---
+        self.log_cwnd()
+
 
     def get_next_content(self):
         """Gets the next chunk of file data to send."""
@@ -211,6 +312,12 @@ class Server:
 
     def process_incoming_ack(self, packet):
         """Handles an incoming ACK from the client."""
+        
+        # --- [NEW] Store old state for logging ---
+        old_cwnd = self.cwnd_bytes
+        old_ssthresh = self.ssthresh
+        old_state = self.state
+        
         header_fields = self.unpack_header(packet)
         if header_fields is None:
             return # Malformed packet
@@ -254,7 +361,11 @@ class Server:
                 self.cwnd_bytes += PAYLOAD_SIZE
                 self.resend_missing_packet()
             
-            return # End processing for DUP ACK
+            # --- [NEW] Log if state changed ---
+            if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
+                self.log_cwnd()
+            
+            return "CONTINUE" # End processing for DUP ACK
 
         # --- 2. New ACK (Data is Acknowledged) ---
         if cum_ack > self.base_seq_num:
@@ -299,18 +410,33 @@ class Server:
                     self.state = STATE_CONGESTION_AVOIDANCE
             
             elif self.state == STATE_CONGESTION_AVOIDANCE:
-                # --- FIX: Additive Increase ---
-                # (MSS * MSS) / cwnd_bytes
-                # Add at least 1 byte to ensure window grows
-                increment = max(1, int(PAYLOAD_SIZE * (PAYLOAD_SIZE / self.cwnd_bytes)))
-                self.cwnd_bytes += increment
+                # --- [FIX] Corrected Additive Increase ---
+                # Use a float accumulator (self.ack_credits) to sum
+                # fractional increments: (MSS * MSS) / cwnd
+                
+                increment_frac = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                self.ack_credits += increment_frac
+                
+                if self.ack_credits >= 1.0:
+                    int_increment = int(self.ack_credits)
+                    self.cwnd_bytes += int_increment
+                    self.ack_credits -= int_increment # Keep the fractional part
 
 
             # Check if this ACK is the final EOF ACK
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
                 print("Final EOF ACK received.")
+                
+                # --- [NEW] Log final state change ---
+                if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
+                    self.log_cwnd()
+                
                 return "DONE"
         
+        # --- [NEW] Log if state changed ---
+        if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
+            self.log_cwnd()
+            
         return "CONTINUE"
 
 
@@ -329,6 +455,18 @@ class Server:
             
         self.start_time = time.time()
         self.last_ack_time = self.start_time
+
+        # --- [NEW] Initialize CWND Log File ---
+        try:
+            self.cwnd_log_file = open(self.log_filename, "w", buffering=1) # line-buffered
+            self.cwnd_log_file.write("timestamp_s,cwnd_bytes,ssthresh_bytes,state\n")
+            print(f"Logging CWND to {self.log_filename}")
+            # Log the initial state
+            self.log_cwnd()
+        except IOError as e:
+            print(f"Error: Could not open log file {self.log_filename}: {e}")
+            self.cwnd_log_file = None
+
         running = True
         
         while running:
@@ -371,6 +509,13 @@ class Server:
         print(f"Throughput: {throughput:.2f} Mbps")
         print("---------------------------------")
 
+        # --- [NEW] Close log and plot ---
+        if self.cwnd_log_file:
+            self.cwnd_log_file.close()
+            print(f"CWND log saved to {self.log_filename}")
+            # Try to plot the results
+            self.plot_cwnd(self.log_filename)
+        
         # Give client time to shut down
         time.sleep(1)
         self.socket.close()
@@ -388,4 +533,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
