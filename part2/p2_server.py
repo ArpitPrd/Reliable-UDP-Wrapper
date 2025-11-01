@@ -460,7 +460,7 @@ class Server:
         try:
             self.cwnd_log_file = open(self.log_filename, "w", buffering=1) # line-buffered
             self.cwnd_log_file.write("timestamp_s,cwnd_bytes,ssthresh_bytes,state\n")
-            print(f"Logging CWND to {self.log_filename}")
+            print(f"#################################Logging CWND to {self.log_filename}")
             # Log the initial state
             self.log_cwnd()
         except IOError as e:
