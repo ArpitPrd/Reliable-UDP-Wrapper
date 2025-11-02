@@ -79,6 +79,44 @@ def plot_bw_vs_util_jfi(csv_filename):
     except Exception as e:
         print(f"Error saving plot: {e}")
 
+def plot_cwnd_with_time(filename):
+    """
+    mainly for understanding how the network changes
+    """
+
+    try:
+        data = pd.read_csv(filename)
+    except FileNotFoundError:
+        print(f"File was not found")
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot Link Utilization
+    ax.plot(data['timestamp_s'], data['cwnd_bytes'], 'o-', label='cwnd window', color='tab:blue', linewidth=2)
+    
+    # Plot Jain Fairness Index (JFI)
+    ax.plot(data['timestamp_s'], data['ssthresh_bytes'], 's--', label='threshold', color='tab:red', linewidth=2)
+
+    # --- 4. Style Plot ---
+    ax.set_title('Cong. W and Thres. vs time')
+    ax.set_xlabel('time')
+    ax.set_ylabel('Bytes')
+    
+    ax.legend()
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    
+    plt.tight_layout()
+
+    # --- 5. Save and Show ---
+    # Create an output filename based on the input CSV name
+    output_filename = os.path.splitext(filename)[0] + '.png'
+    try:
+        plt.savefig(output_filename)
+        print(f"\nPlot saved successfully to: {output_filename}")
+        plt.show()
+    except Exception as e:
+        print(f"Error saving plot: {e}")
+
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: python3 {sys.argv[0]} <path_to_csv_file>")
@@ -86,7 +124,10 @@ def main():
         sys.exit(1)
         
     csv_filename = sys.argv[1]
-    plot_bw_vs_util_jfi(csv_filename)
+    if 'fixed_bandwidth' in csv_filename:
+        plot_bw_vs_util_jfi(csv_filename)
+    if 'cwnd' in csv_filename:
+        plot_cwnd_with_time(csv_filename)
 
 if __name__ == "__main__":
     main()
