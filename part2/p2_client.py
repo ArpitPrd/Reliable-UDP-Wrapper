@@ -24,7 +24,7 @@ EOF_FLAG = 0x4
 
 # --- Receive Window ---
 # Max size of out-of-order buffer (in packets)
-MAX_RECV_WINDOW_PACKETS = 200
+MAX_RECV_WINDOW_PACKETS = 2000
 
 class Client:
     def __init__(self, server_ip, server_port, output_filename):
