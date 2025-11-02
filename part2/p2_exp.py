@@ -154,8 +154,8 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     server_py = "p2_server.py"
 
 
-    s1_pid_raw = s1.cmdPrint(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} > /tmp/s1_server.out 2>&1 & echo $!'").strip()
-    s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} > /tmp/s2_server.out 2>&1 & echo $!'").strip()
+    s1_pid_raw = s1.cmdPrint(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} &> /tmp/s1_server.out 2>&1 & echo $!'").strip()
+    s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} &> /tmp/s2_server.out 2>&1 & echo $!'").strip()
     s1_pid = s1_pid_raw.split()[0] if s1_pid_raw else None
     s2_pid = s2_pid_raw.split()[0] if s2_pid_raw else None
     print(f"started server s1 pid: {s1_pid}, s2 pid: {s2_pid}")

@@ -381,6 +381,9 @@ class Server:
         old_state = self.state
         
         header_fields = self.unpack_header(packet)
+
+        print(f"The header fields in some server is: {header_fields}")
+
         if header_fields is None:
             return 
             

@@ -57,12 +57,12 @@ def run(expname):
     SERVER_PORT = 6555
     SWS = 5 * 1180
             
-    NUM_ITERATIONS = 5 
+    NUM_ITERATIONS = 1
     OUTFILE = 'received_data.txt'
     delay_list, loss_list, jitter_list = [], [], []
 
     if expname == "loss":
-        loss_list = [x for x in range(1,6)]
+        loss_list = [x for x in range(5,6)]
         delay_list = [20]     
         jitter_list = [0]   
     elif expname == "jitter":
@@ -100,8 +100,8 @@ def run(expname):
 
                     start_time = time.time()
                     
-                    h1.cmd(f"python3 p1_server.py {SERVER_IP} {SERVER_PORT} {SWS} &")
-                    result = h2.cmd(f"python3 p1_client.py {SERVER_IP} {SERVER_PORT}")
+                    h1.cmd(f"python3 p1_server.py {SERVER_IP} {SERVER_PORT} {SWS} > /tmp/p1_server_logs.txt 2>&1 &")
+                    result = h2.cmd(f"python3 p1_client.py {SERVER_IP} {SERVER_PORT} > /tmp/p1_client_logs.txt 2>&1")
                     end_time = time.time()
                     ttc = end_time - start_time
 
