@@ -20,7 +20,7 @@ HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
 MSS_BYTES = 1200  # Max Segment Size (matches assignment)
 PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE  # 1180 bytes
-MAX_CWND = 1024 * 1024
+MAX_CWND = 8*1024 * 1024
 
 # --- Flags ---
 SYN_FLAG = 0x1
@@ -291,7 +291,6 @@ class Server:
                 count += 1
                 if count >= 2:
                     break
-                return
 
     # --- [CUBIC] New function to handle congestion event ---
     def enter_cubic_congestion_avoidance(self):
@@ -357,10 +356,10 @@ class Server:
         # self.state = STATE_SLOW_START
         # self.cwnd_bytes = MSS_BYTES
 
-        self.self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / self.srtt)), 2 * MSS_BYTES)
-        self.cwnd_bytes = self.ssthresh
-        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-        self.state = STATE_CONGESTION_AVOIDANCE
+        self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001))), 2 * MSS_BYTES)
+        self.cwnd_bytes = MSS_BYTES
+        self.state = STATE_SLOW_START
+
 
         
         self.rto = min(self.rto * 1.5, 2.0) # Cap at 60s
@@ -412,7 +411,7 @@ class Server:
 
     def send_new_data(self):
         """Sends new data packets as allowed by cwnd."""
-        time.sleep(0.0003)
+        # time.sleep(0.0003)
         inflight = self.next_seq_num - self.base_seq_num
 
         while inflight < self.cwnd_bytes:
@@ -503,6 +502,7 @@ class Server:
                 
                 # self.resend_missing_packet()
                 self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / self.srtt)), 2 * MSS_BYTES)
+                self.enter_cubic_congestion_avoidance()
                 self.cwnd_bytes = self.ssthresh + 3 * MSS_BYTES
                 self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 self.state = STATE_FAST_RECOVERY
