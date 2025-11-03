@@ -33,9 +33,9 @@ STATE_CONGESTION_AVOIDANCE = 2
 STATE_FAST_RECOVERY = 3
 
 # --- RTO Calculation Constants ---
-ALPHA = 0.125  # For SRTT
-BETA = 0.25   # For RTTVAR
-K = 2.0
+ALPHA = 0.1
+BETA = 0.2
+K = 1.5
 INITIAL_RTO = 0.15
 MIN_RTO = 0.05
 
@@ -69,7 +69,7 @@ class Server:
         
         # --- Congestion Control (Reno/CUBIC) ---
         self.state = STATE_SLOW_START
-        self.cwnd_bytes = 10*MSS_BYTES   # Congestion window in bytes
+        self.cwnd_bytes = (8 + (self.port % 4)) * MSS_BYTES   # Congestion window in bytes
         self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
         
         # --- RTO Calculation ---
@@ -357,7 +357,7 @@ class Server:
         # self.state = STATE_SLOW_START
         # self.cwnd_bytes = MSS_BYTES
 
-        self.ssthresh = max(self.cwnd_bytes / 2, 2 * MSS_BYTES)
+        self.self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / self.srtt)), 2 * MSS_BYTES)
         self.cwnd_bytes = self.ssthresh
         self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
         self.state = STATE_CONGESTION_AVOIDANCE
@@ -367,6 +367,8 @@ class Server:
         self.dup_ack_count = 0
 
         self.log_cwnd()
+        self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
+    
 
     # [OPTIMIZATION] New function to get the delay for select()
     def get_next_rto_delay(self):
@@ -410,6 +412,7 @@ class Server:
 
     def send_new_data(self):
         """Sends new data packets as allowed by cwnd."""
+        time.sleep(0.0003)
         inflight = self.next_seq_num - self.base_seq_num
 
         while inflight < self.cwnd_bytes:
@@ -499,7 +502,7 @@ class Server:
                 # self.state = STATE_FAST_RECOVERY
                 
                 # self.resend_missing_packet()
-                self.ssthresh = max(self.cwnd_bytes / 2, 2 * MSS_BYTES)
+                self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / self.srtt)), 2 * MSS_BYTES)
                 self.cwnd_bytes = self.ssthresh + 3 * MSS_BYTES
                 self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 self.state = STATE_FAST_RECOVERY
@@ -559,8 +562,9 @@ class Server:
                 self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 
                 # Check for transition to Congestion Avoidance
-                if self.cwnd_bytes >= self.ssthresh:
+                if self.cwnd_bytes >= self.ssthresh * 0.9:
                     self.state = STATE_CONGESTION_AVOIDANCE
+                    self.cwnd_bytes = min(self.cwnd_bytes, self.ssthresh)
             
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 
