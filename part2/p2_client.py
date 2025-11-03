@@ -3,6 +3,7 @@ import sys
 import time
 import struct
 import os
+import heapq # [OPTIMIZATION] Added for efficient receive buffer
 
 # --- Constants ---
 # Packet Header Format:
@@ -31,7 +32,7 @@ class Client:
         self.server_addr = (server_ip, int(server_port))
         self.output_filename = output_filename
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.settimeout(5.0)  # 5 second timeout for recv
+        self.socket.settimeout(30.0)  # 5 second timeout for recv
         
         self.output_file = None
         self.start_time = 0
@@ -40,8 +41,10 @@ class Client:
         self.next_expected_seq_num = 0
         
         # --- Receive Buffer ---
-        # {seq_num: (data, flags)} for out-of-order packets
-        self.receive_buffer = {}
+        # [OPTIMIZATION] Use a min-heap (list) to store (seq_num, data, flags)
+        self.receive_buffer = []
+        # [OPTIMIZATION] Use a set to quickly check for duplicates
+        self.receive_buffer_seqs = set()
         
         print(f"Client ready to connect to {server_ip}:{server_port}")
         print(f"Will save to: {output_filename}")
@@ -110,17 +113,16 @@ class Client:
 
     def find_first_sack_block(self):
         """Finds the first block of out-of-order data in the buffer."""
+        # [OPTIMIZATION] With heap, the smallest is always at index 0
         if not self.receive_buffer:
             return 0, 0
         
-        # Find the block starting with the lowest seq num
-        # This is a simple impl; a real one would find contiguous blocks
         try:
-            first_key = min(self.receive_buffer.keys())
-            data, flags = self.receive_buffer[first_key]
+            # Peek at the smallest item in the heap
+            seq_num, data, flags = self.receive_buffer[0]
             # SACK block is [start_seq, end_seq)
-            return first_key, first_key + len(data)
-        except (ValueError, KeyError):
+            return seq_num, seq_num + len(data)
+        except (ValueError, KeyError, IndexError):
              return 0, 0
 
     def process_packet(self, packet):
@@ -141,8 +143,11 @@ class Client:
                 return "DONE"
             else:
                 # Got EOF out of order. Store it.
-                if seq_num > self.next_expected_seq_num and seq_num not in self.receive_buffer:
-                    self.receive_buffer[seq_num] = (data, flags)
+                # [OPTIMIZATION] Use set to check for duplicates
+                if seq_num > self.next_expected_seq_num and seq_num not in self.receive_buffer_seqs:
+                    # [OPTIMIZATION] Push to heap
+                    heapq.heappush(self.receive_buffer, (seq_num, data, flags))
+                    self.receive_buffer_seqs.add(seq_num)
                 
                 # Send ACK for what we are still missing, with SACK info
                 sack_start_block, sack_end_block = self.find_first_sack_block()
@@ -157,9 +162,11 @@ class Client:
             self.write_to_txt(data)
             self.next_expected_seq_num += len(data)
             
-            # Check buffer for contiguous packets
-            while self.next_expected_seq_num in self.receive_buffer:
-                buffered_data, buffered_flags = self.receive_buffer.pop(self.next_expected_seq_num)
+            # [OPTIMIZATION] Check heap for contiguous packets
+            while self.receive_buffer and self.receive_buffer[0][0] == self.next_expected_seq_num:
+                # [OPTIMIZATION] Pop from heap
+                buffered_seq_num, buffered_data, buffered_flags = heapq.heappop(self.receive_buffer)
+                self.receive_buffer_seqs.remove(buffered_seq_num)
                 
                 if buffered_flags & EOF_FLAG:
                     print("Processing buffered EOF.")
@@ -177,10 +184,13 @@ class Client:
         # 2. Got a packet from the future (out-of-order)
         elif seq_num > self.next_expected_seq_num:
             # print(f"Received out-of-order: Seq={seq_num} (Expected={self.next_expected_seq_num})")
-            if seq_num not in self.receive_buffer:
+            # [OPTIMIZATION] Use set to check for duplicates
+            if seq_num not in self.receive_buffer_seqs:
                  # Check if buffer is full
                 if len(self.receive_buffer) < MAX_RECV_WINDOW_PACKETS:
-                    self.receive_buffer[seq_num] = (data, flags)
+                    # [OPTIMIZATION] Push to heap
+                    heapq.heappush(self.receive_buffer, (seq_num, data, flags))
+                    self.receive_buffer_seqs.add(seq_num)
                 else:
                     print("Receive buffer full, dropping packet.")
             
@@ -284,4 +294,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
