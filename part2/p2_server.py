@@ -362,7 +362,7 @@ class Server:
         """Returns the time in seconds until the next RTO, or a default."""
         if not self.sent_packets:
             # No packets in flight, just check for client inactivity
-            return 1.0 # Poll every 1 second
+            return 0.001 # Poll every 1 second
         
         try:
             # Get the *first* (oldest) item from OrderedDict
