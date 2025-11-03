@@ -400,51 +400,45 @@ class Server:
     def send_new_data(self):
         """Sends new data packets as allowed by cwnd."""
         inflight = self.next_seq_num - self.base_seq_num
-        
+
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
                 break
-                
+
             data, seq_num, flags = self.get_next_content()
-            
+
             if data is None:
-                break 
-            
+                break
+
             header = self.pack_header(seq_num, 0, flags)
             packet = header + data
-            
+
             try:
                 self.socket.sendto(packet, self.client_addr)
                 # [OPTIMIZATION] Add to end of OrderedDict
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
-                print(f"Sent seq={seq_num}, next={self.next_seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
+                print(f"Sent seq={seq_num}, next_seq={self.next_seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
             except OSError as e:
-                # [OPTIMIZATION] Handle non-blocking socket errors
-                if e.errno in [11, 35, 10035]: # EAGAIN / EWOULDBLOCK
-                    # Socket send buffer is full. Stop sending.
-                    # print("Socket buffer full, pausing send.")
-                    
-                    # We failed to send, so roll back the seq num
+                if e.errno in [11, 35, 10035]:  # EAGAIN / EWOULDBLOCK
                     if flags & EOF_FLAG:
                         self.eof_sent_seq = -1
                     else:
                         self.next_seq_num = seq_num
-                    break # Stop trying to send
-                
+                    break
                 if e.errno in [101, 111, 113]:
                     print(f"Client unreachable on send: {e}. Aborting transfer.")
                     self.connection_dead = True
-                    break 
+                    break
                 else:
-                    raise 
+                    raise
             except Exception as e:
                 print(f"Error in send_new_data: {e}")
                 self.connection_dead = True
-                break 
-            
+                break
+
             if flags & EOF_FLAG:
-                break 
-                
+                break
+
             inflight = self.next_seq_num - self.base_seq_num
 
     def process_incoming_ack(self, packet):
