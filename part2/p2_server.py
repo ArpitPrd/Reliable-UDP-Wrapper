@@ -7,8 +7,6 @@ import math # For CUBIC
 import csv # For logging
 import select # [OPTIMIZATION] Added for event-driven I/O
 import collections # [OPTIMIZATION] Added for efficient timeout checking
-import random
-
 
 # --- Constants ---
 # Packet Header Format:
@@ -22,6 +20,7 @@ HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
 MSS_BYTES = 1200  # Max Segment Size (matches assignment)
 PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE  # 1180 bytes
+MAX_CWND = 1024 * 1024
 
 # --- Flags ---
 SYN_FLAG = 0x1
@@ -36,11 +35,9 @@ STATE_FAST_RECOVERY = 3
 # --- RTO Calculation Constants ---
 ALPHA = 0.125  # For SRTT
 BETA = 0.25   # For RTTVAR
-K = 4.0
-INITIAL_RTO = 0.2  # 1 second
-MIN_RTO = 0.05     # 200ms
-
-P_CONGEST_REACT = 0.8
+K = 2.0
+INITIAL_RTO = 0.15
+MIN_RTO = 0.05
 
 
 class Server:
@@ -72,7 +69,7 @@ class Server:
         
         # --- Congestion Control (Reno/CUBIC) ---
         self.state = STATE_SLOW_START
-        self.cwnd_bytes = MSS_BYTES   # Congestion window in bytes
+        self.cwnd_bytes = 10*MSS_BYTES   # Congestion window in bytes
         self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
         
         # --- RTO Calculation ---
@@ -287,9 +284,13 @@ class Server:
     def resend_missing_packet(self):
         """SACK-aware retransmission (for Fast Recovery)."""
         # [OPTIMIZATION] Iterate keys, as OrderedDict is safe
+        count = 0
         for seq_num in list(self.sent_packets.keys()):
             if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
                 self.resend_packet(seq_num)
+                count += 1
+                if count >= 2:
+                    break
                 return
 
     # --- [CUBIC] New function to handle congestion event ---
@@ -324,59 +325,48 @@ class Server:
 
     # [OPTIMIZATION] Renamed from find_timeouts to handle_timeouts
     def handle_timeouts(self):
-        """Checks for and retransmits timed-out packets with probabilistic congestion response."""
+        """Checks for and retransmits timed-out packets."""
         now = time.time()
         packets_to_resend = []
-
-        # Only check the oldest packets first (OrderedDict preserves send order)
+        
+        # [OPTIMIZATION] Only check oldest packets due to OrderedDict
         for seq_num, (packet, send_time, retrans_count) in self.sent_packets.items():
             if now - send_time > self.rto:
-                # Apply probabilistic congestion reaction
-                if random.random() < P_CONGEST_REACT:
-                    print("Timeout (RTO). Reducing cwnd (probabilistic).")
-                    self.enter_cubic_congestion_avoidance()
-                    # Gentle reduction — do not always collapse to MSS
-                    self.cwnd_bytes = max(self.cwnd_bytes * self.beta_cubic, MSS_BYTES)
-                    self.state = STATE_CONGESTION_AVOIDANCE
-                else:
-                    print("Timeout detected, skipping cwnd reduction (probabilistic desync).")
                 packets_to_resend.append(seq_num)
             else:
-                # Because of OrderedDict, if this packet hasn’t timed out,
-                # none of the newer ones will have either.
-                break
+                # Oldest packet hasn't timed out, so none have
+                break 
 
         if not packets_to_resend:
             return
 
         # Only resend the *oldest* timed-out packet
         oldest_seq_num = packets_to_resend[0]
-
+        
         if not self.resend_packet(oldest_seq_num):
-            # If resend fails (socket closed or client dead)
-            return
+            return # Resend failed (e.g., socket busy or dead)
 
-        # --- Handle RTO Event (CUBIC-compatible logic) ---
-        print("Timeout (RTO). Entering Slow Start for recovery.")
+        # --- Handle RTO Event (CUBIC) ---
+        print("Timeout (RTO). Entering Slow Start.")
+        
+        # [CUBIC] This is a congestion event.
+        # Enter CA to set W_max, K, ssthresh
+        self.enter_cubic_congestion_avoidance() 
+        
+        # [CUBIC] On RTO, enter Slow Start and reset cwnd to 1
+        # self.state = STATE_SLOW_START
+        # self.cwnd_bytes = MSS_BYTES
 
-        # Record congestion event (update W_max, K, etc.)
-        self.enter_cubic_congestion_avoidance()
+        self.ssthresh = max(self.cwnd_bytes / 2, 2 * MSS_BYTES)
+        self.cwnd_bytes = self.ssthresh
+        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+        self.state = STATE_CONGESTION_AVOIDANCE
 
-        # Re-enter Slow Start only with probability P_CONGEST_REACT
-        if random.random() < P_CONGEST_REACT:
-            self.state = STATE_SLOW_START
-            self.cwnd_bytes = MSS_BYTES
-        else:
-            # Otherwise stay in CA but with slightly reduced window
-            self.state = STATE_CONGESTION_AVOIDANCE
-            self.cwnd_bytes = max(self.cwnd_bytes * self.beta_cubic, MSS_BYTES)
-
-        # Add small random jitter to RTO to avoid synchronization
-        self.rto = min(self.rto * 2 * random.uniform(0.9, 1.1), 5.0)
-
+        
+        self.rto = min(self.rto * 1.5, 2.0) # Cap at 60s
         self.dup_ack_count = 0
-        self.log_cwnd()
 
+        self.log_cwnd()
 
     # [OPTIMIZATION] New function to get the delay for select()
     def get_next_rto_delay(self):
@@ -502,19 +492,26 @@ class Server:
                 
                 # [CUBIC] This is a congestion event.
                 # Set W_max, K, ssthresh
-                self.enter_cubic_congestion_avoidance()
+                # self.enter_cubic_congestion_avoidance()
                 
-                # [CUBIC] Set cwnd = ssthresh
-                self.cwnd_bytes = self.ssthresh 
+                # # [CUBIC] Set cwnd = ssthresh
+                # self.cwnd_bytes = self.ssthresh 
+                # self.state = STATE_FAST_RECOVERY
+                
+                # self.resend_missing_packet()
+                self.ssthresh = max(self.cwnd_bytes / 2, 2 * MSS_BYTES)
+                self.cwnd_bytes = self.ssthresh + 3 * MSS_BYTES
+                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 self.state = STATE_FAST_RECOVERY
-                
                 self.resend_missing_packet()
+
             
             # --- In Fast Recovery ---
             elif self.state == STATE_FAST_RECOVERY:
                 # [CUBIC] Unlike Reno, CUBIC does NOT inflate the window
                 # on subsequent DUP ACKs. It waits for the new ACK.
-                pass
+                self.cwnd_bytes += MSS_BYTES
+                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
             
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
@@ -559,6 +556,7 @@ class Server:
             if self.state == STATE_SLOW_START:
                 # Exponential growth
                 self.cwnd_bytes += PAYLOAD_SIZE
+                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 
                 # Check for transition to Congestion Avoidance
                 if self.cwnd_bytes >= self.ssthresh:
@@ -570,12 +568,13 @@ class Server:
                     # --- Reno-like AI (no congestion event yet) ---
                     # Use float accumulator for: (MSS * MSS) / cwnd
                     if self.cwnd_bytes > 0:
-                        increment_frac = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                        increment_frac = 1.5*(PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
                         self.ack_credits += increment_frac
                     
                     if self.ack_credits >= 1.0:
                         int_increment = int(self.ack_credits)
                         self.cwnd_bytes += int_increment
+                        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                         self.ack_credits -= int_increment
                 
                 else:
@@ -608,6 +607,7 @@ class Server:
                     # Increment = (W_target(t+RTT) - W(t)) / (W(t)/MSS)
                     increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
                     self.cwnd_bytes += increment_bytes
+                    self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                     # --- End Optimization ---
 
 
