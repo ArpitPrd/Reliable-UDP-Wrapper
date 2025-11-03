@@ -352,7 +352,7 @@ class Server:
         self.state = STATE_SLOW_START
         self.cwnd_bytes = MSS_BYTES
         
-        self.rto = min(self.rto * 2, 2.0) # Cap at 60s
+        self.rto = min(self.rto * 2, 6.0) # Cap at 60s
         self.dup_ack_count = 0
 
         self.log_cwnd()
