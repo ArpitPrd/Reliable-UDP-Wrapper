@@ -352,7 +352,7 @@ class Server:
         self.state = STATE_SLOW_START
         self.cwnd_bytes = MSS_BYTES
         
-        self.rto = min(self.rto * 2, 60.0) # Cap at 60s
+        self.rto = min(self.rto * 2, 5.0) # Cap at 60s
         self.dup_ack_count = 0
 
         self.log_cwnd()
@@ -679,7 +679,7 @@ class Server:
             # 6. Check for client inactivity
             # *** MISTAKE 2 (FIX) ***
             # Changed timeout from 1e2 (100s) to 15.0s
-            if time.time() - self.last_ack_time > 15.0:
+            if time.time() - self.last_ack_time > 30.0:
                 print("Client timed out (15s). Shutting down.")
                 running = False
         # --- End Optimization Loop ---

@@ -138,7 +138,7 @@ class Client:
             # If it's the one we expect
             if seq_num == self.next_expected_seq_num:
                 # Send final ACK (seq_num + 1)
-                self.prepare_ack(seq_num + 1, flags=ACK_FLAG | EOF_FLAG)
+                self.prepare_ack(seq_num, flags=ACK_FLAG | EOF_FLAG)
                 print("Received EOF, sending final ACK.")
                 return "DONE"
             else:
