@@ -1,0 +1,17 @@
+# Python package requirements for Assignment 4 (Both Parts)
+# Install with: pip install -r requirements.txt
+
+# Data analysis and manipulation
+pandas>=1.3.0
+
+# Plotting and visualization
+matplotlib>=3.4.0
+
+# Scientific computing and statistics
+scipy>=1.7.0
+numpy>=1.21.0
+
+# Note: Mininet and Ryu are not pip packages
+# Install separately:
+# - Mininet: sudo apt-get install mininet
+# - Ryu: sudo pip install ryu
