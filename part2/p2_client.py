@@ -128,7 +128,7 @@ class Client:
     def process_packet(self, packet):
         """Processes an incoming data packet."""
         seq_num, ack_num, flags, sack_start, sack_end, data = self.unpack_header(packet)
-        
+        print(f"Received seq={seq_num}, sending ack={self.next_expected_seq_num}")
         if seq_num is None:
             return "CONTINUE" # Bad packet
         

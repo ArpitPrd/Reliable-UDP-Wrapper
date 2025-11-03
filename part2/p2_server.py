@@ -462,7 +462,7 @@ class Server:
             return 
             
         seq_num, cum_ack, flags, sack_start, sack_end = header_fields
-        
+        print(f"Sent seq={seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
         if not (flags & ACK_FLAG):
             return 
             
@@ -475,7 +475,6 @@ class Server:
         if sack_start > 0 and sack_end > sack_start:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
-
         # --- 1. Duplicate ACK ---
         if cum_ack == self.base_seq_num:
             if self.state != STATE_FAST_RECOVERY:
