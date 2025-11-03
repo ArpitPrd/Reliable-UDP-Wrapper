@@ -35,7 +35,7 @@ STATE_FAST_RECOVERY = 3
 ALPHA = 0.125  # For SRTT
 BETA = 0.25   # For RTTVAR
 K = 4.0
-INITIAL_RTO = 1.0  # 1 second
+INITIAL_RTO = 0.2  # 1 second
 MIN_RTO = 0.2     # 200ms
 
 
