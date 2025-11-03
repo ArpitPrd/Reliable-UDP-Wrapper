@@ -36,7 +36,7 @@ ALPHA = 0.125  # For SRTT
 BETA = 0.25   # For RTTVAR
 K = 4.0
 INITIAL_RTO = 0.2  # 1 second
-MIN_RTO = 0.2     # 200ms
+MIN_RTO = 0.05     # 200ms
 
 
 class Server:
