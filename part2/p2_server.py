@@ -469,12 +469,12 @@ class Server:
         self.last_ack_time = time.time()
         
         # --- SACK Processing ---
+        # *** MISTAKE 1 (FIX) ***
+        # The original loop was incorrect as it assumed PAYLOAD_SIZE increments.
+        # Our client sends a single packet SACK, so we just add the start.
         if sack_start > 0 and sack_end > sack_start:
-            seq = sack_start
-            while seq < sack_end:
-                if seq in self.sent_packets:
-                    self.sacked_packets.add(seq)
-                seq += PAYLOAD_SIZE 
+            if sack_start in self.sent_packets:
+                self.sacked_packets.add(sack_start)
 
         # --- 1. Duplicate ACK ---
         if cum_ack == self.base_seq_num:
@@ -683,8 +683,10 @@ class Server:
             self.send_new_data()
 
             # 6. Check for client inactivity
-            if time.time() - self.last_ack_time > 1e2:
-                print("Client timed out (10s). Shutting down.")
+            # *** MISTAKE 2 (FIX) ***
+            # Changed timeout from 1e2 (100s) to 15.0s
+            if time.time() - self.last_ack_time > 15.0:
+                print("Client timed out (15s). Shutting down.")
                 running = False
         # --- End Optimization Loop ---
 
