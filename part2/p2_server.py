@@ -417,6 +417,7 @@ class Server:
                 self.socket.sendto(packet, self.client_addr)
                 # [OPTIMIZATION] Add to end of OrderedDict
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
+                print(f"Sent seq={seq_num}, next={self.next_seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
             except OSError as e:
                 # [OPTIMIZATION] Handle non-blocking socket errors
                 if e.errno in [11, 35, 10035]: # EAGAIN / EWOULDBLOCK
@@ -462,7 +463,7 @@ class Server:
             return 
             
         seq_num, cum_ack, flags, sack_start, sack_end = header_fields
-        print(f"Sent seq={seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
+
         if not (flags & ACK_FLAG):
             return 
             
