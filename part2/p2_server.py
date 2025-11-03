@@ -7,6 +7,8 @@ import math # For CUBIC
 import csv # For logging
 import select # [OPTIMIZATION] Added for event-driven I/O
 import collections # [OPTIMIZATION] Added for efficient timeout checking
+import random
+
 
 # --- Constants ---
 # Packet Header Format:
@@ -37,6 +39,8 @@ BETA = 0.25   # For RTTVAR
 K = 4.0
 INITIAL_RTO = 0.2  # 1 second
 MIN_RTO = 0.05     # 200ms
+
+P_CONGEST_REACT = 0.8
 
 
 class Server:
@@ -320,42 +324,59 @@ class Server:
 
     # [OPTIMIZATION] Renamed from find_timeouts to handle_timeouts
     def handle_timeouts(self):
-        """Checks for and retransmits timed-out packets."""
+        """Checks for and retransmits timed-out packets with probabilistic congestion response."""
         now = time.time()
         packets_to_resend = []
-        
-        # [OPTIMIZATION] Only check oldest packets due to OrderedDict
+
+        # Only check the oldest packets first (OrderedDict preserves send order)
         for seq_num, (packet, send_time, retrans_count) in self.sent_packets.items():
             if now - send_time > self.rto:
+                # Apply probabilistic congestion reaction
+                if random.random() < P_CONGEST_REACT:
+                    print("Timeout (RTO). Reducing cwnd (probabilistic).")
+                    self.enter_cubic_congestion_avoidance()
+                    # Gentle reduction — do not always collapse to MSS
+                    self.cwnd_bytes = max(self.cwnd_bytes * self.beta_cubic, MSS_BYTES)
+                    self.state = STATE_CONGESTION_AVOIDANCE
+                else:
+                    print("Timeout detected, skipping cwnd reduction (probabilistic desync).")
                 packets_to_resend.append(seq_num)
             else:
-                # Oldest packet hasn't timed out, so none have
-                break 
+                # Because of OrderedDict, if this packet hasn’t timed out,
+                # none of the newer ones will have either.
+                break
 
         if not packets_to_resend:
             return
 
         # Only resend the *oldest* timed-out packet
         oldest_seq_num = packets_to_resend[0]
-        
+
         if not self.resend_packet(oldest_seq_num):
-            return # Resend failed (e.g., socket busy or dead)
+            # If resend fails (socket closed or client dead)
+            return
 
-        # --- Handle RTO Event (CUBIC) ---
-        print("Timeout (RTO). Entering Slow Start.")
-        
-        # [CUBIC] This is a congestion event.
-        # Enter CA to set W_max, K, ssthresh
-        self.enter_cubic_congestion_avoidance() 
-        
-        # [CUBIC] On RTO, enter Slow Start and reset cwnd to 1
-        self.state = STATE_SLOW_START
-        self.cwnd_bytes = MSS_BYTES
-        
-        self.rto = min(self.rto * 2, 5.0) # Cap at 60s
+        # --- Handle RTO Event (CUBIC-compatible logic) ---
+        print("Timeout (RTO). Entering Slow Start for recovery.")
+
+        # Record congestion event (update W_max, K, etc.)
+        self.enter_cubic_congestion_avoidance()
+
+        # Re-enter Slow Start only with probability P_CONGEST_REACT
+        if random.random() < P_CONGEST_REACT:
+            self.state = STATE_SLOW_START
+            self.cwnd_bytes = MSS_BYTES
+        else:
+            # Otherwise stay in CA but with slightly reduced window
+            self.state = STATE_CONGESTION_AVOIDANCE
+            self.cwnd_bytes = max(self.cwnd_bytes * self.beta_cubic, MSS_BYTES)
+
+        # Add small random jitter to RTO to avoid synchronization
+        self.rto = min(self.rto * 2 * random.uniform(0.9, 1.1), 5.0)
+
         self.dup_ack_count = 0
-
         self.log_cwnd()
+
 
     # [OPTIMIZATION] New function to get the delay for select()
     def get_next_rto_delay(self):
