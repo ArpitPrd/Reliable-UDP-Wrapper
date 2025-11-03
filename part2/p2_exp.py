@@ -150,6 +150,13 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     s1 = net.get('s1')
     s2 = net.get('s2')
 
+    print("Disabling checksum offloading on hosts...")
+    c1.cmd('ethtool -K c1-eth0 tx off rx off')
+    c2.cmd('ethtool -K c2-eth0 tx off rx off')
+    s1.cmd('ethtool -K s1-eth0 tx off rx off')
+    s2.cmd('ethtool -K s2-eth0 tx off rx off')
+    print("Checksum offloading disabled.")
+
     # Start servers on s1 and s2 and capture their PIDs 
     server_py = "p2_server.py"
 
@@ -334,6 +341,15 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
     s1 = net.get('s1')
     s2 = net.get('s2')
     s3 = net.get('s3')
+
+    print("Disabling checksum offloading on hosts (with UDP)...")
+    c1.cmd('ethtool -K c1-eth0 tx off rx off')
+    c2.cmd('ethtool -K c2-eth0 tx off rx off')
+    c3.cmd('ethtool -K c3-eth0 tx off rx off')
+    s1.cmd('ethtool -K s1-eth0 tx off rx off')
+    s2.cmd('ethtool -K s2-eth0 tx off rx off')
+    s3.cmd('ethtool -K s3-eth0 tx off rx off')
+    print("Checksum offloading disabled.")
 
     # Start TCP servers on s1 and s2 and capture their PIDs 
     server_py = 'p2_server.py'
