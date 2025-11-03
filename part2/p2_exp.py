@@ -155,10 +155,10 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
 
 
     s1_pid_raw = s1.cmdPrint(f"bash -c 'python3 {server_py} {s1.IP()} {SERVER_PORT1} &> /tmp/s1_server.out 2>&1 & echo $!'").strip()
-    s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} &> /tmp/s2_server.out 2>&1 & echo $!'").strip()
+    # s2_pid_raw = s2.cmdPrint(f"bash -c 'python3 {server_py} {s2.IP()} {SERVER_PORT2} &> /tmp/s2_server.out 2>&1 & echo $!'").strip()
     s1_pid = s1_pid_raw.split()[0] if s1_pid_raw else None
-    s2_pid = s2_pid_raw.split()[0] if s2_pid_raw else None
-    print(f"started server s1 pid: {s1_pid}, s2 pid: {s2_pid}")
+    # s2_pid = s2_pid_raw.split()[0] if s2_pid_raw else None
+    # print(f"started server s1 pid: {s1_pid}, s2 pid: {s2_pid}")
     time.sleep(1)
 
 
@@ -174,7 +174,7 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
     start_time_c2 = time.time()
 
     c1_pid_raw = c1.cmd(f"bash -c '{c1_start_cmd} > /tmp/{pref_c1}.out 2>&1 & echo $!'").strip()
-    c2_pid_raw = c2.cmd(f"bash -c '{c2_start_cmd} > /tmp/{pref_c2}.out 2>&1 & echo $!'").strip()
+    # c2_pid_raw = c2.cmd(f"bash -c '{c2_start_cmd} > /tmp/{pref_c2}.out 2>&1 & echo $!'").strip()
     if c1_pid_raw:
         c1_pid = c1_pid_raw.split()[0]
         print(f"started client 1 with PID: {c1_pid}")
@@ -182,12 +182,12 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
         print(" warning: no pid returned for client1 start; will use pgrep to detect completion")
         c1_pid = None
 
-    if c2_pid_raw:
-        c2_pid = c2_pid_raw.split()[0]
-        print(f"started client 2 with PID: {c2_pid}")
-    else:
-        print(" warning: no pid returned for client2 start; will use pgrep to detect completion")
-        c2_pid = None
+    # if c2_pid_raw:
+    #     c2_pid = c2_pid_raw.split()[0]
+    #     print(f"started client 2 with PID: {c2_pid}")
+    # else:
+    #     print(" warning: no pid returned for client2 start; will use pgrep to detect completion")
+    #     c2_pid = None
 
     
 
@@ -205,15 +205,15 @@ def run_trial(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mean=None, i
             except Exception as e:
                 print("error checking client1:", e)
                 end_time_c1 = time.time()
-        if end_time_c2 is None:
-            try:
-                pg_c2 = c2.cmd(f"ps -p {c2_pid} -o pid= || true").strip()
-                if not pg_c2:
-                    end_time_c2 = time.time()
-                    print(f"client 2 completed at {end_time_c2}")
-            except Exception as e:
-                print("error checking client2:", e)
-                end_time_c2 = time.time()
+        # if end_time_c2 is None:
+        #     try:
+        #         pg_c2 = c2.cmd(f"ps -p {c2_pid} -o pid= || true").strip()
+        #         if not pg_c2:
+        #             end_time_c2 = time.time()
+        #             print(f"client 2 completed at {end_time_c2}")
+        #     except Exception as e:
+        #         print("error checking client2:", e)
+        #         end_time_c2 = time.time()
 
     print(f"client 1 finished at {end_time_c1}, client 2 finished at {end_time_c2}")
 
