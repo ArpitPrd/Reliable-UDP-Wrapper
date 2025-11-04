@@ -392,7 +392,16 @@ class Server:
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
-                    self.enter_cubic_congestion_avoidance()
+                    
+                    # --- FIX: Start CUBIC clock immediately ---
+                    # This ensures we use the RTT-independent CUBIC growth
+                    # logic *even before* the first loss event.
+                    if self.t_last_congestion == 0:
+                        # Set w_max to the *current* cwnd (which is ssthresh)
+                        self.w_max_bytes = self.cwnd_bytes 
+                        # Start the CUBIC clock
+                        self.enter_cubic_congestion_avoidance() 
+                    # --- End of Fix ---
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 if self.t_last_congestion == 0:
                     # Reno-like additive increase
