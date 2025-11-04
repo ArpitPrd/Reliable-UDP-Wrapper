@@ -347,6 +347,7 @@ class Server:
             return # Resend failed (e.g., socket busy or dead)
 
         # --- Handle RTO Event (CUBIC) ---
+        print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
         print("Timeout (RTO). Entering Slow Start.")
         
         # [CUBIC] This is a congestion event.
@@ -431,7 +432,7 @@ class Server:
                 self.socket.sendto(packet, self.client_addr)
                 # [OPTIMIZATION] Add to end of OrderedDict
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
-                print(f"Sent seq={seq_num}, next_seq={self.next_seq_num}, cwnd={self.cwnd_bytes}, base={self.base_seq_num}")
+                print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
                 if e.errno in [11, 35, 10035]:  # EAGAIN / EWOULDBLOCK
                     if flags & EOF_FLAG:
@@ -551,6 +552,7 @@ class Server:
 
             # Update base
             self.base_seq_num = cum_ack
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
             
             # --- Update CWND (Reno/CUBIC Logic) ---
             if self.state == STATE_FAST_RECOVERY:
