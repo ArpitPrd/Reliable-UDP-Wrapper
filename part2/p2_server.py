@@ -85,7 +85,7 @@ class Server:
         offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
         self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh = 2 * 1024 * 1024 * 1024
+        self.ssthresh = 128 * 1024
 
         # RTO
         self.rto = INITIAL_RTO
@@ -245,6 +245,9 @@ class Server:
         self.cwnd_bytes = self.ssthresh
         self.state = STATE_CONGESTION_AVOIDANCE
         # -------------------------------
+
+        self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND)
+        self.ssthresh = max(self.ssthresh, MIN_CWND)
 
         self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
         self.dup_ack_count = 0
@@ -445,28 +448,46 @@ class Server:
                         self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
                         self.ack_credits -= i
                 else:
-                    # CUBIC-like growth (retained as fallback)
+                    # CUBIC-like growth
                     rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
                     t_elapsed = time.time() - self.t_last_congestion
+                    
+                    # Reno-friendly growth curve (W_tcp)
                     alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                    t_target = t_elapsed + rtt_min_sec
-                    t_minus_K = t_target - self.K
-                    w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
-                    target_cwnd = max(w_cubic_target, w_tcp)
-                    cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                    increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
+
+                    # CUBIC growth curve (W_cubic)
+                    # We use t_elapsed to get the target for *now*
+                    t_now_minus_K = t_elapsed - self.K
+                    w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
+
+                    # The target cwnd is the larger of the two
+                    target_cwnd = max(w_cubic_now, w_tcp)
+                    target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
+
+                    # --- THIS IS THE FIX ---
+                    # Now, grow towards the target_cwnd using the ack_credits system.
                     
-                    # --- THIS IS THE KEY CHANGE ---
-                    # The old logic was (0.86 * cwnd) + (0.14 * (cwnd + inc)), 
-                    # which is cwnd + (0.14 * inc). This applies only 14% of
-                    # the calculated growth and is EXTREMELY slow.
-                    #
-                    # We will replace it with a direct blend between the
-                    # current cwnd and the CUBIC target.
-                    inertia = 0.5 # Make this 0.5 (or even 0.2) for faster response
-                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
-                    self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+                    inc_per_rtt = 0.0
+                    if self.cwnd_bytes < target_cwnd:
+                        # We are below the target, grow fast.
+                        # Increment is (target - current) / (current / MSS)
+                        # This scales the growth to be faster as the gap is larger
+                        inc_per_rtt = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                    else:
+                        # We are at or above the target (e.g., in the "concave" region)
+                        # Just do standard additive increase.
+                        inc_per_rtt = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
+
+                    # Scale the RTT-based increment to a per-ACK increment
+                    inc_per_ack = inc_per_rtt * PAYLOAD_SIZE / self.cwnd_bytes
+                    self.ack_credits += inc_per_ack
+
+                    # Apply the credits
+                    if self.ack_credits >= 1.0:
+                        i = int(self.ack_credits)
+                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                        self.ack_credits -= i
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
             # self._apply_rate_targeting()
