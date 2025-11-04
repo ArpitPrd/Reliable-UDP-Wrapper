@@ -367,8 +367,7 @@ class Server:
 
             # update base
             self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, bw_est_Mbps={(self.bw_est_bytes_per_sec*8)/1e6:.3f}")
-
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
                 # Correct exponential growth: increase by the amount of data
