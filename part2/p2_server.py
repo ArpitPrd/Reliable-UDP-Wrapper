@@ -407,7 +407,7 @@ class Server:
                     w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
 
                     # The target cwnd is the larger of the two
-                    target_cwnd = w_cubic_now
+                    target_cwnd = max(w_cubic_now, w_tcp)
                     target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
 
                     # --- THIS IS THE FIX ---
