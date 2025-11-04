@@ -25,13 +25,13 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-STATE_FAST_RECOVERY = 3
+# STATE_FAST_RECOVERY = 3
 
 # RTO constants
-ALPHA = 0.05
-BETA = 0.1
-K = 1.25
-INITIAL_RTO = 0.15
+ALPHA = 0.125  # Standard: 1/8
+BETA = 0.25    # Standard: 1/4
+K = 4.0        # Standard: 4
+INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
 # Bandwidth->target util mapping (from user's benchmark)
@@ -129,7 +129,7 @@ class Server:
         if self.state == STATE_SLOW_START: return "SS"
         if self.state == STATE_CONGESTION_AVOIDANCE:
             return "CUBIC" if self.t_last_congestion > 0 else "CA"
-        if self.state == STATE_FAST_RECOVERY: return "FR"
+        # if self.state == STATE_FAST_RECOVERY: return "FR"
         return "UNK"
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
@@ -231,17 +231,24 @@ class Server:
         if not self.resend_packet(oldest):
             return
         print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
-        print("Timeout (RTO). Entering Slow Start.")
-        # congestion event
+        print("Timeout (RTO). Reducing window (NOT resetting to 1).")
+        
+        # This is the CUBIC response (beta_cubic = 0.7)
+        # This sets self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
+        # It also resets the CUBIC clock.
         self.enter_cubic_congestion_avoidance()
-        # conservative slow-start after RTO
-        self.ssthresh = max(int(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001)))), 2 * MSS_BYTES)
-        self.cwnd_bytes = MSS_BYTES
-        self.state = STATE_SLOW_START
-        self.rto = min(self.rto * 1.5, 2.0)
+
+        # --- THIS IS THE KEY CHANGE ---
+        # DO NOT reset cwnd to 1 MSS. This is catastrophic for performance.
+        # Instead, set cwnd to the new ssthresh (which is 0.7 * old_cwnd) 
+        # and enter Congestion Avoidance directly.
+        self.cwnd_bytes = self.ssthresh
+        self.state = STATE_CONGESTION_AVOIDANCE
+        # -------------------------------
+
+        self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
         self.dup_ack_count = 0
         self.log_cwnd()
-        self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
 
     # --- bandwidth estimator & cwnd targeter ---
     def _record_acked_bytes(self, bytes_acked):
@@ -303,7 +310,7 @@ class Server:
             time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
-        self._apply_rate_targeting()
+        # self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -360,17 +367,24 @@ class Server:
 
         # Duplicate ACK
         if cum_ack == self.base_seq_num:
-            if self.state != STATE_FAST_RECOVERY:
-                self.dup_ack_count += 1
-            if self.dup_ack_count == 3 and self.state != STATE_FAST_RECOVERY:
-                print("3 Dup-ACKs. Entering Fast Recovery.")
-                self.ssthresh = max(int(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001)))), 2 * MSS_BYTES)
-                self.enter_cubic_congestion_avoidance()
-                self.cwnd_bytes = min(self.ssthresh + 3 * MSS_BYTES, MAX_CWND)
-                self.state = STATE_FAST_RECOVERY
+            self.dup_ack_count += 1
+            
+            if self.dup_ack_count == 3:
+                print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
+                
+                # This function sets ssthresh = cwnd * beta_cubic (0.7) 
+                # and resets the CUBIC growth curve.
+                self.enter_cubic_congestion_avoidance() 
+                
+                # Set the new cwnd to the new ssthresh (multiplicative decrease).
+                self.cwnd_bytes = self.ssthresh
+                
+                # We STAY in STATE_CONGESTION_AVOIDANCE.
                 self.resend_missing_packet()
-            elif self.state == STATE_FAST_RECOVERY:
-                self.cwnd_bytes = min(self.cwnd_bytes + MSS_BYTES, MAX_CWND)
+            
+            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
+            # new ACK to signal recovery from this loss event.
+
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
             return "CONTINUE"
@@ -414,13 +428,10 @@ class Server:
             print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, bw_est_Mbps={(self.bw_est_bytes_per_sec*8)/1e6:.3f}")
 
             # Update cwnd: slow start or congestion avoidance
-            if self.state == STATE_FAST_RECOVERY:
-                self.state = STATE_CONGESTION_AVOIDANCE
-
             if self.state == STATE_SLOW_START:
                 self.cwnd_bytes = min(self.cwnd_bytes + PAYLOAD_SIZE, MAX_CWND)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
-                if self.cwnd_bytes >= 256 * 1024:
+                if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
@@ -445,13 +456,20 @@ class Server:
                     target_cwnd = max(w_cubic_target, w_tcp)
                     cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
                     increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                    # smooth update to avoid oscillation
-                    inertia = 0.86
-                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * (self.cwnd_bytes + increment_bytes)
+                    
+                    # --- THIS IS THE KEY CHANGE ---
+                    # The old logic was (0.86 * cwnd) + (0.14 * (cwnd + inc)), 
+                    # which is cwnd + (0.14 * inc). This applies only 14% of
+                    # the calculated growth and is EXTREMELY slow.
+                    #
+                    # We will replace it with a direct blend between the
+                    # current cwnd and the CUBIC target.
+                    inertia = 0.5 # Make this 0.5 (or even 0.2) for faster response
+                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
                     self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            self._apply_rate_targeting()
+            # self._apply_rate_targeting()
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
