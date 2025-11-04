@@ -31,7 +31,7 @@ STATE_CONGESTION_AVOIDANCE = 2
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 5.0        # Standard: 4
-INITIAL_RTO = 0.1 # 150ms is fine for this low-latency network
+INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
 # Minimum cwnd in bytes (stay able to probe)
@@ -64,9 +64,9 @@ class Server:
 
         # Congestion control
         self.state = STATE_SLOW_START
-        offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
-        self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
+        # offset_factor = (self.port % 7) / 7.0
+        self.cwnd_bytes = (6) * MSS_BYTES
+        # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
         self.ssthresh =  512
 
         # RTO
@@ -250,8 +250,8 @@ class Server:
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
         # small deterministic startup jitter (only while there is no inflight)
-        if inflight == 0 and self.startup_delay > 0:
-            time.sleep(self.startup_delay)
+        # if inflight == 0 and self.startup_delay > 0:
+        #     time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
         # self._apply_rate_targeting()
