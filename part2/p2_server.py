@@ -303,7 +303,7 @@ class Server:
             time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
-        self._apply_rate_targeting()
+        # self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -420,7 +420,7 @@ class Server:
             if self.state == STATE_SLOW_START:
                 self.cwnd_bytes = min(self.cwnd_bytes + PAYLOAD_SIZE, MAX_CWND)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
-                if self.cwnd_bytes >= 256 * 1024:
+                if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
@@ -451,7 +451,7 @@ class Server:
                     self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            self._apply_rate_targeting()
+            # self._apply_rate_targeting()
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
