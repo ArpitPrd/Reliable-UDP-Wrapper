@@ -356,9 +356,6 @@ class Server:
                     del self.sent_packets[s]
                 self.sacked_packets.discard(s)
 
-            # record acked bytes for bandwidth estimator
-            if acked_bytes > 0:
-                self._record_acked_bytes(acked_bytes)
 
             # update base
             self.base_seq_num = cum_ack
