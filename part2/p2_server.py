@@ -418,7 +418,15 @@ class Server:
                     w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
 
                     # The target cwnd is the larger of the two
-                    target_cwnd = max(w_cubic_now, w_tcp)
+                    # --- FIX ---
+                    # Default to the CUBIC target
+                    target_cwnd = w_cubic_now
+
+                    # But, if CUBIC's target is *less* than Reno's,
+                    # be "friendly" and use Reno's target.
+                    if target_cwnd < w_tcp:
+                        target_cwnd = w_tcp
+                    # --- End of Fix ---
                     target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
 
                     # --- THIS IS THE FIX ---
