@@ -34,20 +34,6 @@ K = 4.0        # Standard: 4
 INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
-# Bandwidth->target util mapping (from user's benchmark)
-# (bandwidth_mbps, target_util)
-BANDWIDTH_UTIL_TABLE = [
-    (100, 0.54),
-    (200, 0.29),
-    (300, 0.19),
-    (400, 0.17),
-    (500, 0.13),
-    (600, 0.10),
-    (700, 0.10),
-    (800, 0.058),
-    (900, 0.055),
-    (1000, 0.056)
-]
 
 # Rate estimator window (seconds)
 BW_WINDOW = 0.5  # 500 ms for smoothing and reactivity
@@ -85,7 +71,7 @@ class Server:
         offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
         self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh = 128 * 1024
+        self.ssthresh = 2048 * 1024
 
         # RTO
         self.rto = INITIAL_RTO
@@ -107,7 +93,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.4
-        self.beta_cubic = 0.7
+        self.beta_cubic = 0.8
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -253,43 +239,6 @@ class Server:
         self.dup_ack_count = 0
         self.log_cwnd()
 
-    # --- bandwidth estimator & cwnd targeter ---
-    def _record_acked_bytes(self, bytes_acked):
-        now = time.time()
-        self.acked_history.append((now, bytes_acked))
-        # prune
-        cutoff = now - BW_WINDOW
-        total = 0
-        while self.acked_history and self.acked_history[0][0] < cutoff:
-            self.acked_history.popleft()
-        total = sum(x[1] for x in self.acked_history)
-        self.bw_est_bytes_per_sec = total / BW_WINDOW
-
-    def _choose_target_util(self):
-        # bw_est in Bps -> convert to Mbps
-        est_mbps = (self.bw_est_bytes_per_sec * 8) / 1_000_000.0
-        if est_mbps <= 0:
-            # fallback default
-            return 0.5
-        # find closest table bw
-        best = min(BANDWIDTH_UTIL_TABLE, key=lambda x: abs(x[0] - est_mbps))
-        return best[1]
-
-    def _apply_rate_targeting(self):
-        # If we have srtt and bw_est, compute target cwnd = bw_bytes_per_sec * srtt * util
-        if self.srtt <= 0 or self.bw_est_bytes_per_sec <= 0:
-            return
-        util = self._choose_target_util()
-        target_cwnd = self.bw_est_bytes_per_sec * max(self.srtt, 0.001) * util
-        # blend smoothly
-        inertia = 0.88  # higher = smoother (0.8-0.95)
-        # ensure target at least MIN_CWND
-        target_cwnd = max(target_cwnd, MIN_CWND)
-        # move cwnd toward target
-        self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
-        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-        # keep a floor
-        self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
 
     # --- send logic ---
     def get_next_content(self):
@@ -432,7 +381,7 @@ class Server:
 
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
-                self.cwnd_bytes = min(self.cwnd_bytes + PAYLOAD_SIZE, MAX_CWND)
+                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
