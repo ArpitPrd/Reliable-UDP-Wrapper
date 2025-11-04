@@ -92,7 +92,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.4
-        self.beta_cubic = 0.88
+        self.beta_cubic = 0.85
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -197,8 +197,9 @@ class Server:
         num = w_mss * (1.0 - self.beta_cubic) / max(self.C, 1e-9)
         self.K = (num ** (1.0/3.0)) if num > 0 else 0.0
         
-        self.cwnd_bytes = int(self.cwnd_bytes * 0.9 + self.ssthresh * 0.1)
-        
+        self.cwnd_bytes = int(self.cwnd_bytes * 1.1)
+        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+
     # --- timeouts ---
     def handle_timeouts(self):
         now = time.time()
@@ -427,9 +428,9 @@ class Server:
                     # Now, grow towards the target_cwnd using the ack_credits system.
                     
                     inc_per_ack = 0.0 # <-- Renamed variable for clarity
-                    srtt_est = max(self.srtt, rtt_min_sec)         # avoid zero
-                    rtt_comp = math.sqrt(srtt_est / rtt_min_sec)
-                    rtt_comp = min(rtt_comp, 1.5)             # >=1 for higher-RTT flows
+                    srtt_est = max(self.srtt, rtt_min_sec)
+                    rtt_comp = srtt_est / rtt_min_sec
+                    rtt_comp = min(rtt_comp, 2.0)
 
                     if self.cwnd_bytes < target_cwnd:
                         inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
