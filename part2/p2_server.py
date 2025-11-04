@@ -32,7 +32,7 @@ ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 4.0        # Standard: 4
 INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
-MIN_RTO = 0.05
+MIN_RTO = 0.03
 
 # Bandwidth->target util mapping (from user's benchmark)
 # (bandwidth_mbps, target_util)
@@ -106,8 +106,8 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 0.4
-        self.beta_cubic = 0.7
+        self.C = 0.6
+        self.beta_cubic = 0.8
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -279,7 +279,7 @@ class Server:
         util = self._choose_target_util()
         target_cwnd = self.bw_est_bytes_per_sec * max(self.srtt, 0.001) * util
         # blend smoothly
-        inertia = 0.88  # higher = smoother (0.8-0.95)
+        inertia = 0.75  # higher = smoother (0.8-0.95)
         # ensure target at least MIN_CWND
         target_cwnd = max(target_cwnd, MIN_CWND)
         # move cwnd toward target
@@ -310,7 +310,7 @@ class Server:
             time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
-        # self._apply_rate_targeting()
+        self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -469,9 +469,11 @@ class Server:
                 # 5. Apply the increment (THIS IS THE SECOND FIX)
                 # We REMOVE the "inertia" blend and apply the increment directly.
                 self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
+                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            # self._apply_rate_targeting()
+            self._apply_rate_targeting()
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
