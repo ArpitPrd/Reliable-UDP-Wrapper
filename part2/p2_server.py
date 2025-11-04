@@ -310,7 +310,7 @@ class Server:
             time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
-        # self._apply_rate_targeting()
+        self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -433,7 +433,7 @@ class Server:
             if self.state == STATE_SLOW_START:
                 # Correct exponential growth: increase by the amount of data
                 # that was just acknowledged.
-                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
+                # self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
                 
                 # Correctly transition to Congestion Avoidance when cwnd > ssthresh
                 if self.cwnd_bytes >= self.ssthresh:
@@ -468,10 +468,10 @@ class Server:
                 
                 # 5. Apply the increment (THIS IS THE SECOND FIX)
                 # We REMOVE the "inertia" blend and apply the increment directly.
-                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
+                # self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            # self._apply_rate_targeting()
+            self._apply_rate_targeting()
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
