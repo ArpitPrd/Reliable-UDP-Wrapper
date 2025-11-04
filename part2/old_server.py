@@ -25,7 +25,7 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-STATE_FAST_RECOVERY = 3
+# STATE_FAST_RECOVERY = 3
 
 # RTO constants
 ALPHA = 0.125  # Standard: 1/8
@@ -107,7 +107,7 @@ class Server:
         if self.state == STATE_SLOW_START: return "SS"
         if self.state == STATE_CONGESTION_AVOIDANCE:
             return "CUBIC" if self.t_last_congestion > 0 else "CA"
-        if self.state == STATE_FAST_RECOVERY: return "FR"
+        # if self.state == STATE_FAST_RECOVERY: return "FR"
         return "UNK"
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
@@ -209,21 +209,22 @@ class Server:
         if not self.resend_packet(oldest):
             return
         print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
-        print("Timeout (RTO). Resetting to Slow Start.")
+        print("Timeout (RTO). Reducing window (NOT resetting to 1).")
         
-        # This is the CUBIC response to a full RTO
-        # 1. Reset the CUBIC clock and set ssthresh (based on current cwnd)
+        # This is the CUBIC response (beta_cubic = 0.7)
+        # This sets self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
+        # It also resets the CUBIC clock.
         self.enter_cubic_congestion_avoidance()
 
-        # 2. Reset cwnd to a safe value
-        self.cwnd_bytes = MIN_CWND
-        
-        # 3. Enter Slow Start
-        self.state = STATE_SLOW_START
+        # --- THIS IS THE KEY CHANGE ---
+        # DO NOT reset cwnd to 1 MSS. This is catastrophic for performance.
+        # Instead, set cwnd to the new ssthresh (which is 0.7 * old_cwnd) 
+        # and enter Congestion Avoidance directly.
+        self.cwnd_bytes = self.ssthresh
+        self.state = STATE_CONGESTION_AVOIDANCE
         # -------------------------------
 
-        # ssthresh is already set by enter_cubic_congestion_avoidance()
-        # self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND) # This is done by setting to MIN_CWND
+        self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND)
         self.ssthresh = max(self.ssthresh, MIN_CWND)
 
         self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
@@ -312,29 +313,21 @@ class Server:
         if cum_ack == self.base_seq_num:
             self.dup_ack_count += 1
             
-            if self.state == STATE_FAST_RECOVERY:
-                # We are already in Fast Recovery, inflate window for each new dup-ACK
-                self.cwnd_bytes = min(self.cwnd_bytes + MSS_BYTES, MAX_CWND)
-                print(f"Dup-ACK in FR. Inflating cwnd to {int(self.cwnd_bytes)}")
-                # This allows send_new_data() to send one new packet
-            
-            elif self.dup_ack_count == 3:
-                # This is the trigger for Fast Retransmit / Fast Recovery
-                print("3 Dup-ACKs. Entering Fast Recovery (Reno-style).")
+            if self.dup_ack_count == 3:
+                print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
                 
-                # 1. Perform CUBIC reduction (sets ssthresh and resets CUBIC clock)
+                # This function sets ssthresh = cwnd * beta_cubic (0.7) 
+                # and resets the CUBIC growth curve.
                 self.enter_cubic_congestion_avoidance() 
                 
-                # 2. Resend missing packet
-                self.resend_missing_packet()
+                # Set the new cwnd to the new ssthresh (multiplicative decrease).
+                self.cwnd_bytes = self.ssthresh
                 
-                # 3. Inflate window (Reno-style) and enter FR state
-                # Set cwnd to ssthresh + 3*MSS to account for the packets
-                # that triggered the dup-ACKs and are still in flight.
-                self.cwnd_bytes = self.ssthresh + 3 * MSS_BYTES
-                self.state = STATE_FAST_RECOVERY
+                # We STAY in STATE_CONGESTION_AVOIDANCE.
+                self.resend_missing_packet()
             
-            # else (dup_ack_count < 3, and not in FR): do nothing, just wait.
+            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
+            # new ACK to signal recovery from this loss event.
 
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
@@ -342,14 +335,6 @@ class Server:
 
         # New ACK (cumulative ack advanced)
         if cum_ack > self.base_seq_num:
-            
-            if self.state == STATE_FAST_RECOVERY:
-                # This is the ACK that recovers from the loss.
-                print("New ACK in FR. Exiting Fast Recovery.")
-                # "Deflate" the window back to ssthresh and enter Congestion Avoidance.
-                self.cwnd_bytes = self.ssthresh
-                self.state = STATE_CONGESTION_AVOIDANCE
-            
             self.dup_ack_count = 0
             newly_acked = []
             for seq in list(self.sent_packets.keys()):

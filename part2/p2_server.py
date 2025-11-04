@@ -30,7 +30,7 @@ STATE_FAST_RECOVERY = 3
 # RTO constants
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
-K = 5.0        # Standard: 4
+K = 4.0        # Standard: 4
 INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
@@ -71,7 +71,7 @@ class Server:
         offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
         self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh = 512
+        self.ssthresh = 2 * 1024 * 1024 * 1024
 
         # RTO
         self.rto = INITIAL_RTO
@@ -92,8 +92,8 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 0.25
-        self.beta_cubic = 1.0
+        self.C = 0.4
+        self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -355,7 +355,6 @@ class Server:
                 if s in self.sent_packets:
                     del self.sent_packets[s]
                 self.sacked_packets.discard(s)
-
 
             # update base
             self.base_seq_num = cum_ack
