@@ -32,11 +32,7 @@ ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 5.0        # Standard: 4
 INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
-MIN_RTO = 0.1
-
-
-# Rate estimator window (seconds)
-BW_WINDOW = 0.5  # 500 ms for smoothing and reactivity
+MIN_RTO = 0.05
 
 # Minimum cwnd in bytes (stay able to probe)
 MIN_CWND = 4 * MSS_BYTES
