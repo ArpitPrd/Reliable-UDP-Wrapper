@@ -75,32 +75,50 @@ def plot_bw_vs_util_jfi(csv_filename):
     try:
         plt.savefig(output_filename)
         print(f"\nPlot saved successfully to: {output_filename}")
-        plt.show()
+        # plt.show() # Removed plt.show()
     except Exception as e:
         print(f"Error saving plot: {e}")
 
 def plot_cwnd_with_time(filename):
     """
-    mainly for understanding how the network changes
+    Plots cwnd and ssthresh over time from a cwnd log CSV.
     """
 
     try:
         data = pd.read_csv(filename)
     except FileNotFoundError:
-        print(f"File was not found")
+        print(f"Error: The file '{filename}' was not found.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading CSV file: {e}")
+        sys.exit(1)
+        
+    # Convert bytes to KiloBytes for readability
+    data['cwnd_KB'] = data['cwnd_bytes'] / 1024.0
+    # Handle potential large ssthresh values
+    data['ssthresh_KB'] = data['ssthresh_bytes'].apply(
+        lambda x: x / 1024.0 if x < 2**30 else float('nan') # Set very large values to NaN
+    )
     
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 6)) # Made plot wider
 
-    # Plot Link Utilization
-    ax.plot(data['timestamp_s'], data['cwnd_bytes'], 'o-', label='cwnd window', color='tab:blue', linewidth=2)
+    # Plot cwnd (no markers, just a line)
+    ax.plot(data['timestamp_s'], data['cwnd_KB'], '-', 
+            label='cwnd (KB)', color='tab:blue', linewidth=1.5)
     
-    # Plot Jain Fairness Index (JFI)
-    ax.plot(data['timestamp_s'], data['ssthresh_bytes'], 's--', label='threshold', color='tab:red', linewidth=2)
+    # Plot ssthresh (no markers, just a dashed line)
+    ax.plot(data['timestamp_s'], data['ssthresh_KB'], '--', 
+            label='ssthresh (KB)', color='tab:red', linewidth=1.5)
 
     # --- 4. Style Plot ---
-    ax.set_title('Cong. W and Thres. vs time')
-    ax.set_xlabel('time')
-    ax.set_ylabel('Bytes')
+    ax.set_title('Congestion Window (cwnd) vs. Time')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Window Size (KB)')
+    
+    # Set y-axis to start from 0
+    ax.set_ylim(bottom=0)
+    # Set x-axis to start from 0
+    ax.set_xlim(left=0)
     
     ax.legend()
     ax.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -113,22 +131,28 @@ def plot_cwnd_with_time(filename):
     try:
         plt.savefig(output_filename)
         print(f"\nPlot saved successfully to: {output_filename}")
-        plt.show()
+        # plt.show() # Removed plt.show()
     except Exception as e:
         print(f"Error saving plot: {e}")
 
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: python3 {sys.argv[0]} <path_to_csv_file>")
-        print("Example: python3 plot_bandwidth_experiment.py p2_fairness_fixed_bandwidth.csv")
+        print("Example: python3 plotter.py p2_fairness_fixed_bandwidth.csv")
+        print("Example: python3 plotter.py cwnd_log_6556.csv")
         sys.exit(1)
         
     csv_filename = sys.argv[1]
+    
+    # Logic to call the correct plotting function
     if 'fixed_bandwidth' in csv_filename:
         plot_bw_vs_util_jfi(csv_filename)
-    if 'cwnd' in csv_filename:
+    elif 'cwnd' in csv_filename:
         plot_cwnd_with_time(csv_filename)
+    else:
+        print(f"Error: Don't know how to plot '{csv_filename}'.")
+        print("Filename must contain 'fixed_bandwidth' or 'cwnd'.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
