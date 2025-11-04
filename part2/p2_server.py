@@ -92,7 +92,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.4
-        self.beta_cubic = 0.85
+        self.beta_cubic = 0.88
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -274,7 +274,7 @@ class Server:
 
                 # If channel not filled yet (inflight < 0.8*cwnd) do no sleep; otherwise small sleep
                 if inflight_ratio >= 0.8:
-                    time.sleep(0.00008)
+                    time.sleep(0.00005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
@@ -428,7 +428,8 @@ class Server:
                     
                     inc_per_ack = 0.0 # <-- Renamed variable for clarity
                     srtt_est = max(self.srtt, rtt_min_sec)         # avoid zero
-                    rtt_comp = srtt_est / rtt_min_sec             # >=1 for higher-RTT flows
+                    rtt_comp = math.sqrt(srtt_est / rtt_min_sec)
+                    rtt_comp = min(rtt_comp, 1.5)             # >=1 for higher-RTT flows
 
                     if self.cwnd_bytes < target_cwnd:
                         inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
