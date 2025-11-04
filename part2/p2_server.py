@@ -46,6 +46,7 @@ class Server:
         self.port = int(port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((self.ip, self.port))
+        self.phase_offset = (self.port % 5) * 0.025
         # [OPTIMIZATION] Set to non-blocking to use with select()
         self.socket.setblocking(False) 
         self.client_addr = None
@@ -69,7 +70,7 @@ class Server:
         
         # --- Congestion Control (Reno/CUBIC) ---
         self.state = STATE_SLOW_START
-        self.cwnd_bytes = (8 + (self.port % 4)) * MSS_BYTES   # Congestion window in bytes
+        self.cwnd_bytes = (6 + (self.port % 5) * 1.5) * MSS_BYTES   # Congestion window in bytes
         self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
         
         # --- RTO Calculation ---
@@ -295,7 +296,7 @@ class Server:
     # --- [CUBIC] New function to handle congestion event ---
     def enter_cubic_congestion_avoidance(self):
         """Called on 3 Dup-ACKs or RTO to set CUBIC parameters."""
-        self.t_last_congestion = time.time()
+        self.t_last_congestion = time.time() - self.phase_offset
         
         # --- [OPTIMIZATION] CUBIC Fast Convergence ---
         new_w_max = self.cwnd_bytes # Store W_max *before* reduction
