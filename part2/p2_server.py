@@ -1,44 +1,59 @@
+#!/usr/bin/env python3
 import socket
 import sys
 import time
 import struct
 import os
-import math # For CUBIC
-import csv # For logging
-import select # [OPTIMIZATION] Added for event-driven I/O
-import collections # [OPTIMIZATION] Added for efficient timeout checking
+import math
+import csv
+import select
+import collections
+from collections import deque
 
 # --- Constants ---
-# Packet Header Format:
-# - Sequence Number (I): 4 bytes, unsigned int
-# - ACK Number (I): 4 bytes, unsigned int
-# - Flags (H): 2 bytes, unsigned short (SYN=1, ACK=2, EOF=4)
-# - SACK Start (I): 4 bytes
-# - SACK End (I): 4 bytes
-# - Padding (2x): 2 bytes
 HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
-MSS_BYTES = 1200  # Max Segment Size (matches assignment)
-PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE  # 1180 bytes
-MAX_CWND = 8*1024 * 1024
+MSS_BYTES = 1200
+PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE
+MAX_CWND = 8 * 1024 * 1024
 
-# --- Flags ---
+# Flags
 SYN_FLAG = 0x1
 ACK_FLAG = 0x2
 EOF_FLAG = 0x4
 
-# --- Congestion Control States ---
+# States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
 STATE_FAST_RECOVERY = 3
 
-# --- RTO Calculation Constants ---
+# RTO constants
 ALPHA = 0.05
 BETA = 0.1
 K = 1.25
 INITIAL_RTO = 0.15
 MIN_RTO = 0.05
 
+# Bandwidth->target util mapping (from user's benchmark)
+# (bandwidth_mbps, target_util)
+BANDWIDTH_UTIL_TABLE = [
+    (100, 0.54),
+    (200, 0.29),
+    (300, 0.19),
+    (400, 0.17),
+    (500, 0.13),
+    (600, 0.10),
+    (700, 0.10),
+    (800, 0.058),
+    (900, 0.055),
+    (1000, 0.056)
+]
+
+# Rate estimator window (seconds)
+BW_WINDOW = 0.5  # 500 ms for smoothing and reactivity
+
+# Minimum cwnd in bytes (stay able to probe)
+MIN_CWND = 4 * MSS_BYTES
 
 class Server:
     def __init__(self, ip, port):
@@ -46,14 +61,11 @@ class Server:
         self.port = int(port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((self.ip, self.port))
-        self.phase_offset = (self.port % 5) * 0.025
-        # [OPTIMIZATION] Set to non-blocking to use with select()
-        self.socket.setblocking(False) 
+        self.socket.setblocking(False)
         self.client_addr = None
         print(f"Server started on {self.ip}:{self.port}")
 
-        self.file_data = b""
-        self.file_size = 0
+        # load file
         try:
             with open("data.txt", "rb") as f:
                 self.file_data = f.read()
@@ -62,160 +74,63 @@ class Server:
             print(f"Error reading data.txt: {e}")
             sys.exit(1)
 
-        # --- Connection State ---
-        self.next_seq_num = 0       # Next seq num to send
-        self.base_seq_num = 0       # Oldest un-ACKed seq num
-        self.eof_sent_seq = -1      # Seq num of the EOF packet
+        # Connection state
+        self.next_seq_num = 0
+        self.base_seq_num = 0
+        self.eof_sent_seq = -1
         self.connection_dead = False
-        
-        # --- Congestion Control (Reno/CUBIC) ---
+
+        # Congestion control
         self.state = STATE_SLOW_START
         offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES   # Congestion window in bytes
-        self.startup_delay = offset_factor * 0.004
-        self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
-        
-        # --- RTO Calculation ---
+        self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
+        self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
+        self.ssthresh = 2 * 1024 * 1024 * 1024
+
+        # RTO
         self.rto = INITIAL_RTO
         self.srtt = 0.0
         self.rttvar = 0.0
-        self.rtt_min = float('inf') # [CUBIC] Minimum observed RTT
-        
-        # --- Retransmission Buffer ---
-        # [OPTIMIZATION] Use OrderedDict to find the oldest packet in O(1)
+        self.rtt_min = float('inf')
+
+        # Sent buffer (seq -> (packet, send_time, retrans_count))
         self.sent_packets = collections.OrderedDict()
-        
-        # --- SACK & Fast Recovery ---
+
+        # SACK & dup-acks
         self.dup_ack_count = 0
         self.sacked_packets = set()
-        
+
+        # bookkeeping
         self.start_time = 0.0
         self.last_ack_time = 0.0
-        
-        # --- Reno AI (for before first congestion event) ---
         self.ack_credits = 0.0
 
-        # --- CUBIC Parameters ---
-        self.C = 0.4  # CUBIC constant
-        self.beta_cubic = 0.7 # CUBIC multiplicative decrease factor
-        self.w_max_bytes = 0.0  # [CUBIC] Window size just before last congestion
-        # [OPTIMIZATION] Added for Fast Convergence
-        self.w_max_last_bytes = 0.0 
-        self.t_last_congestion = 0.0 # [CUBIC] Time of last congestion event
-        self.K = 0.0 # [CUBIC] Time period to reach W_max
-        
+        # CUBIC params (still used as loss fallback)
+        self.C = 0.4
+        self.beta_cubic = 0.7
+        self.w_max_bytes = 0.0
+        self.w_max_last_bytes = 0.0
+        self.t_last_congestion = 0.0
+        self.K = 0.0
 
-        # --- CWND Logging ---
+        # bandwidth estimator: deque of (timestamp, bytes_acked)
+        self.acked_history = deque()
+        self.bw_est_bytes_per_sec = 0.0
+
+        # initial deterministic phase offset used in enter_cubic
+        self.phase_offset = (self.port % 5) * 0.025
+
+        # logging
         self.cwnd_log_file = None
         self.log_filename = f"cwnd_log_{self.port}.csv"
 
+    # --- helpers ---
     def get_state_str(self):
-        """Helper function to get a string for the current state."""
-        if self.state == STATE_SLOW_START:
-            return "SS"
+        if self.state == STATE_SLOW_START: return "SS"
         if self.state == STATE_CONGESTION_AVOIDANCE:
-            # Show "CA" for Reno-AI and "CUBIC" for CUBIC-AI
             return "CUBIC" if self.t_last_congestion > 0 else "CA"
-        if self.state == STATE_FAST_RECOVERY:
-            return "FR"
+        if self.state == STATE_FAST_RECOVERY: return "FR"
         return "UNK"
-
-    def log_cwnd(self):
-        """Logs the current cwnd, ssthresh, and state to the log file."""
-        if not self.cwnd_log_file:
-            return
-        
-        try:
-            timestamp = time.time() - self.start_time
-            state_str = self.get_state_str()
-            # Log: timestamp, cwnd_bytes, ssthresh_bytes, state
-            self.cwnd_log_file.write(f"{timestamp:.4f},{int(self.cwnd_bytes)},{int(self.ssthresh)},{state_str}\n")
-        except Exception as e:
-            print(f"Error writing to log: {e}")
-
-    def plot_cwnd(self, log_filename):
-        """Tries to plot the CWND log file using matplotlib."""
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("\n[Plotting] Matplotlib not found. Skipping plot generation.")
-            print("To install: sudo apt-get install python3-matplotlib (or pip3 install matplotlib)")
-            return
-
-        timestamps = []
-        cwnds_kb = []
-        ssthreshs_kb = []
-        states = []
-        
-        try:
-            with open(log_filename, 'r') as f:
-                reader = csv.reader(f)
-                next(reader) # Skip header
-                for row in reader:
-                    timestamps.append(float(row[0]))
-                    cwnds_kb.append(float(row[1]) / 1024.0)
-                    ssthreshs_kb.append(float(row[2]) / 1024.0)
-                    states.append(row[3])
-        except Exception as e:
-            print(f"Error reading log file for plotting: {e}")
-            return
-
-        if not timestamps:
-            print("[Plotting] No data to plot.")
-            return
-
-        plot_filename = f"cwnd_plot_{self.port}.png"
-        
-        plt.figure(figsize=(12, 6))
-        
-        plt.plot(timestamps, cwnds_kb, label='cwnd (KB)', drawstyle='steps-post')
-        plt.plot(timestamps, ssthreshs_kb, label='ssthresh (KB)', linestyle='--', color='gray', drawstyle='steps-post')
-        
-        # [CUBIC] Updated state colors
-        state_colors = {
-            'SS': (1.0, 0.0, 0.0, 0.1), # Red
-            'CA': (0.0, 1.0, 0.0, 0.1), # Green (Reno-AI)
-            'CUBIC': (0.0, 0.5, 0.5, 0.1), # Teal (Cubic-AI)
-            'FR': (0.0, 0.0, 1.0, 0.1)  # Blue
-        }
-        
-        if states: 
-            last_state = states[0]
-            start_time = timestamps[0]
-            
-            for i in range(1, len(timestamps)):
-                if states[i] != last_state:
-                    plt.axvspan(start_time, timestamps[i], facecolor=state_colors.get(last_state, (0.0, 0.0, 0.0, 0.1)), alpha=1.0)
-                    start_time = timestamps[i]
-                    last_state = states[i]
-            plt.axvspan(start_time, timestamps[-1], facecolor=state_colors.get(last_state, (0.0, 0.0, 0.0, 0.1)), alpha=1.0)
-        
-        if states:
-            handles, labels = plt.gca().get_legend_handles_labels()
-            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['SS']))
-            labels.append('Slow Start (SS)')
-            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['CA']))
-            labels.append('Congestion Avoidance (Reno)')
-            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['CUBIC']))
-            labels.append('Congestion Avoidance (CUBIC)')
-            handles.append(plt.Rectangle((0,0),1,1, facecolor=state_colors['FR']))
-            labels.append('Fast Recovery (FR)')
-            plt.legend(handles, labels)
-        else:
-            plt.legend()
-
-
-        plt.xlabel('Time (seconds)')
-        plt.ylabel('Window Size (KB)')
-        plt.title(f'Congestion Window (cwnd) over Time - Port {self.port}')
-        plt.grid(True)
-        plt.tight_layout()
-        
-        plt.savefig(plot_filename)
-        print(f"[Plotting] CWND plot saved to {plot_filename}")
-
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags, sack_start, sack_end)
@@ -226,178 +141,148 @@ class Server:
         except struct.error:
             return None
 
+    # --- RTO / RTT updates ---
     def update_rto(self, rtt_sample):
-        """Updates RTO using Jacobson's algorithm."""
-        
-        # --- [CUBIC] Track minimum RTT ---
         self.rtt_min = min(self.rtt_min, rtt_sample)
-        
         if self.srtt == 0.0:
-            # First sample
             self.srtt = rtt_sample
             self.rttvar = rtt_sample / 2.0
         else:
-            # Subsequent samples
             self.rttvar = (1 - BETA) * self.rttvar + BETA * abs(self.srtt - rtt_sample)
             self.srtt = (1 - ALPHA) * self.srtt + ALPHA * rtt_sample
-        
-        self.rto = self.srtt + K * self.rttvar
-        self.rto = max(MIN_RTO, self.rto) # Enforce minimum RTO
 
+        # Smoothed RTO to avoid violent swings
+        new_rto = self.srtt + K * self.rttvar
+        # initialize rto on first sample:
+        if self.rto == 0:
+            self.rto = max(MIN_RTO, new_rto)
+        else:
+            self.rto = 0.85 * self.rto + 0.15 * max(MIN_RTO, new_rto)
+        self.rto = max(MIN_RTO, self.rto)
+
+    # --- resend helpers ---
     def resend_packet(self, seq_num):
-        """Resends a specific packet from the buffer."""
-        if seq_num in self.sent_packets:
-            packet_data, send_time, retrans_count = self.sent_packets[seq_num]
-            
-            if retrans_count > 10:
-                print("Packet resend limit reached. Aborting.")
-                self.connection_dead = True # [OPTIMIZATION] Set connection dead
-                return False 
-
-            # [OPTIMIZATION] Must update send_time in OrderedDict
-            # To do this, we must remove and re-add it to the end
-            del self.sent_packets[seq_num]
-            self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
-            
-            try:
-                self.socket.sendto(packet_data, self.client_addr)
-                return True 
-            except OSError as e:
-                # Handle non-blocking socket "errors"
-                if e.errno in [11, 35, 10035]: # EAGAIN / EWOULDBLOCK
-                    print("Socket busy, will retry resend later.")
-                    # [OPTIMIZATION] Re-add packet to *front* of queue
-                    del self.sent_packets[seq_num]
-                    self.sent_packets[seq_num] = (packet_data, send_time, retrans_count)
-                    self.sent_packets.move_to_end(seq_num, last=False)
-                    return False
-                if e.errno in [101, 111, 113]: 
-                    print(f"Client unreachable on resend: {e}. Aborting transfer.")
-                    self.connection_dead = True
-                    return False 
-                else:
-                    raise 
-            except Exception as e:
-                print(f"Error in resend_packet: {e}")
+        if seq_num not in self.sent_packets:
+            return False
+        packet_data, send_time, retrans_count = self.sent_packets[seq_num]
+        if retrans_count > 15:
+            print("Packet resend limit reached. Aborting.")
+            self.connection_dead = True
+            return False
+        # update send time and count
+        del self.sent_packets[seq_num]
+        self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
+        try:
+            self.socket.sendto(packet_data, self.client_addr)
+            return True
+        except OSError as e:
+            if e.errno in [11, 35, 10035]:
+                # put it back front
+                del self.sent_packets[seq_num]
+                self.sent_packets[seq_num] = (packet_data, send_time, retrans_count)
+                self.sent_packets.move_to_end(seq_num, last=False)
+                return False
+            if e.errno in [101, 111, 113]:
+                print(f"Client unreachable on resend: {e}. Aborting.")
                 self.connection_dead = True
                 return False
-                
-        return False
+            raise
+        except Exception as e:
+            print(f"Error in resend_packet: {e}")
+            self.connection_dead = True
+            return False
 
     def resend_missing_packet(self):
-        """SACK-aware retransmission (for Fast Recovery)."""
-        # [OPTIMIZATION] Iterate keys, as OrderedDict is safe
         count = 0
         for seq_num in list(self.sent_packets.keys()):
             if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
                 self.resend_packet(seq_num)
                 count += 1
-                if count >= 2:
-                    break
+                if count >= 2: break
 
-    # --- [CUBIC] New function to handle congestion event ---
+    # --- CUBIC bookkeeping ---
     def enter_cubic_congestion_avoidance(self):
-        """Called on 3 Dup-ACKs or RTO to set CUBIC parameters."""
+        # deterministic phase shift
         self.t_last_congestion = time.time() - self.phase_offset
-        
-        # --- [OPTIMIZATION] CUBIC Fast Convergence ---
-        new_w_max = self.cwnd_bytes # Store W_max *before* reduction
-        
+        new_w_max = self.cwnd_bytes
         if new_w_max < self.w_max_bytes:
-            # New W_max is smaller, apply fast convergence reduction
-            self.w_max_last_bytes = self.w_max_bytes # save old w_max
+            self.w_max_last_bytes = self.w_max_bytes
             self.w_max_bytes = new_w_max * (1.0 + self.beta_cubic) / 2.0
         else:
-            # New W_max is larger, just update
-            self.w_max_last_bytes = self.w_max_bytes # save old w_max
+            self.w_max_last_bytes = self.w_max_bytes
             self.w_max_bytes = new_w_max
-        # --- End Optimization ---
+        self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
+        w_mss = max(1.0, self.w_max_bytes / PAYLOAD_SIZE)
+        num = w_mss * (1.0 - self.beta_cubic) / max(self.C, 1e-9)
+        self.K = (num ** (1.0/3.0)) if num > 0 else 0.0
 
-        # Perform multiplicative decrease
-        self.ssthresh = self.cwnd_bytes * self.beta_cubic
-        
-        # Calculate K (time to reach W_max)
-        # K = (W_max * (1-beta) / C)^(1/3)
-        w_max_mss = max(1.0, self.w_max_bytes / PAYLOAD_SIZE)
-        k_numerator = w_max_mss * (1.0 - self.beta_cubic) / self.C
-        self.K = (k_numerator ** (1.0/3.0)) if k_numerator > 0 else 0.0
-        
-        # Log will be done by the caller (find_timeouts or process_ack)
-        
-
-    # [OPTIMIZATION] Renamed from find_timeouts to handle_timeouts
+    # --- timeouts ---
     def handle_timeouts(self):
-        """Checks for and retransmits timed-out packets."""
         now = time.time()
-        packets_to_resend = []
-        
-        # [OPTIMIZATION] Only check oldest packets due to OrderedDict
+        timed = []
         for seq_num, (packet, send_time, retrans_count) in self.sent_packets.items():
             if now - send_time > self.rto:
-                packets_to_resend.append(seq_num)
+                timed.append(seq_num)
             else:
-                # Oldest packet hasn't timed out, so none have
-                break 
-
-        if not packets_to_resend:
+                break
+        if not timed:
             return
-
-        # Only resend the *oldest* timed-out packet
-        oldest_seq_num = packets_to_resend[0]
-        
-        if not self.resend_packet(oldest_seq_num):
-            return # Resend failed (e.g., socket busy or dead)
-
-        # --- Handle RTO Event (CUBIC) ---
+        oldest = timed[0]
+        if not self.resend_packet(oldest):
+            return
         print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
         print("Timeout (RTO). Entering Slow Start.")
-        
-        # [CUBIC] This is a congestion event.
-        # Enter CA to set W_max, K, ssthresh
-        self.enter_cubic_congestion_avoidance() 
-        
-        # [CUBIC] On RTO, enter Slow Start and reset cwnd to 1
-        # self.state = STATE_SLOW_START
-        # self.cwnd_bytes = MSS_BYTES
-
-        self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001))), 2 * MSS_BYTES)
+        # congestion event
+        self.enter_cubic_congestion_avoidance()
+        # conservative slow-start after RTO
+        self.ssthresh = max(int(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001)))), 2 * MSS_BYTES)
         self.cwnd_bytes = MSS_BYTES
         self.state = STATE_SLOW_START
-
-
-        
-        self.rto = min(self.rto * 1.5, 2.0) # Cap at 60s
+        self.rto = min(self.rto * 1.5, 2.0)
         self.dup_ack_count = 0
-
         self.log_cwnd()
         self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
-    
 
-    # [OPTIMIZATION] New function to get the delay for select()
-    def get_next_rto_delay(self):
-        """Returns the time in seconds until the next RTO, or a default."""
-        if not self.sent_packets:
-            # No packets in flight, just check for client inactivity
-            return 0.0001 # Poll every 1 second
-        
-        try:
-            # Get the *first* (oldest) item from OrderedDict
-            oldest_seq_num = next(iter(self.sent_packets))
-            _packet, send_time, _count = self.sent_packets[oldest_seq_num]
-            
-            expiry_time = send_time + self.rto
-            delay = expiry_time - time.time()
-            
-            # Return a small positive delay, never 0 or negative
-            return max(0.001, delay) 
-            
-        except StopIteration:
-            # Should not happen if self.sent_packets is not empty, but good to check
-            return 1.0
+    # --- bandwidth estimator & cwnd targeter ---
+    def _record_acked_bytes(self, bytes_acked):
+        now = time.time()
+        self.acked_history.append((now, bytes_acked))
+        # prune
+        cutoff = now - BW_WINDOW
+        total = 0
+        while self.acked_history and self.acked_history[0][0] < cutoff:
+            self.acked_history.popleft()
+        total = sum(x[1] for x in self.acked_history)
+        self.bw_est_bytes_per_sec = total / BW_WINDOW
 
+    def _choose_target_util(self):
+        # bw_est in Bps -> convert to Mbps
+        est_mbps = (self.bw_est_bytes_per_sec * 8) / 1_000_000.0
+        if est_mbps <= 0:
+            # fallback default
+            return 0.5
+        # find closest table bw
+        best = min(BANDWIDTH_UTIL_TABLE, key=lambda x: abs(x[0] - est_mbps))
+        return best[1]
 
+    def _apply_rate_targeting(self):
+        # If we have srtt and bw_est, compute target cwnd = bw_bytes_per_sec * srtt * util
+        if self.srtt <= 0 or self.bw_est_bytes_per_sec <= 0:
+            return
+        util = self._choose_target_util()
+        target_cwnd = self.bw_est_bytes_per_sec * max(self.srtt, 0.001) * util
+        # blend smoothly
+        inertia = 0.88  # higher = smoother (0.8-0.95)
+        # ensure target at least MIN_CWND
+        target_cwnd = max(target_cwnd, MIN_CWND)
+        # move cwnd toward target
+        self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
+        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+        # keep a floor
+        self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+
+    # --- send logic ---
     def get_next_content(self):
-        """Gets the next chunk of file data to send."""
         if self.next_seq_num < self.file_size:
             start = self.next_seq_num
             end = min(start + PAYLOAD_SIZE, self.file_size)
@@ -405,40 +290,35 @@ class Server:
             seq_num = start
             self.next_seq_num = end
             return data, seq_num, 0
-        
-        elif self.eof_sent_seq == -1: # File done, EOF not yet sent
+        elif self.eof_sent_seq == -1:
             self.eof_sent_seq = self.file_size
             return b"EOF", self.eof_sent_seq, EOF_FLAG
-        
-        else: # File and EOF already sent
+        else:
             return None, -1, 0
 
     def send_new_data(self):
-        """Sends new data packets as allowed by cwnd."""
-        # time.sleep(0.0003)
         inflight = self.next_seq_num - self.base_seq_num
+        # small deterministic startup jitter (only while there is no inflight)
+        if inflight == 0 and self.startup_delay > 0:
+            time.sleep(self.startup_delay)
+
+        # apply rate targeting on each send cycle if we have an estimator
+        self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
-            if self.startup_delay > 0:
-                time.sleep(self.startup_delay)
             if self.connection_dead:
                 break
-
             data, seq_num, flags = self.get_next_content()
-
             if data is None:
                 break
-
             header = self.pack_header(seq_num, 0, flags)
             packet = header + data
-
             try:
                 self.socket.sendto(packet, self.client_addr)
-                # [OPTIMIZATION] Add to end of OrderedDict
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
-                if e.errno in [11, 35, 10035]:  # EAGAIN / EWOULDBLOCK
+                if e.errno in [11, 35, 10035]:
                     if flags & EOF_FLAG:
                         self.eof_sent_seq = -1
                     else:
@@ -454,275 +334,258 @@ class Server:
                 print(f"Error in send_new_data: {e}")
                 self.connection_dead = True
                 break
-
             if flags & EOF_FLAG:
                 break
-
             inflight = self.next_seq_num - self.base_seq_num
 
+    # --- ACK processing ---
     def process_incoming_ack(self, packet):
-        """Handles an incoming ACK from the client."""
-        
         old_cwnd = self.cwnd_bytes
         old_ssthresh = self.ssthresh
         old_state = self.state
-        
+
         header_fields = self.unpack_header(packet)
-        
-        # [OPTIMIZATION] Removed debug print
-        # print(f"The header fields in some server is: {header_fields}")
-
         if header_fields is None:
-            return 
-            
+            return
         seq_num, cum_ack, flags, sack_start, sack_end = header_fields
-
         if not (flags & ACK_FLAG):
-            return 
-            
+            return
+
         self.last_ack_time = time.time()
-        
-        # --- SACK Processing ---
-        # *** MISTAKE 1 (FIX) ***
-        # The original loop was incorrect as it assumed PAYLOAD_SIZE increments.
-        # Our client sends a single packet SACK, so we just add the start.
+
+        # SACK processing (single SACK support)
         if sack_start > 0 and sack_end > sack_start:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
-        # --- 1. Duplicate ACK ---
+
+        # Duplicate ACK
         if cum_ack == self.base_seq_num:
             if self.state != STATE_FAST_RECOVERY:
                 self.dup_ack_count += 1
-            
-            # --- 3 DUP-ACKs: Enter Fast Recovery (CUBIC) ---
             if self.dup_ack_count == 3 and self.state != STATE_FAST_RECOVERY:
                 print("3 Dup-ACKs. Entering Fast Recovery.")
-                
-                # [CUBIC] This is a congestion event.
-                # Set W_max, K, ssthresh
-                # self.enter_cubic_congestion_avoidance()
-                
-                # # [CUBIC] Set cwnd = ssthresh
-                # self.cwnd_bytes = self.ssthresh 
-                # self.state = STATE_FAST_RECOVERY
-                
-                # self.resend_missing_packet()
-                self.ssthresh = max(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / self.srtt)), 2 * MSS_BYTES)
+                self.ssthresh = max(int(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001)))), 2 * MSS_BYTES)
                 self.enter_cubic_congestion_avoidance()
-                self.cwnd_bytes = self.ssthresh + 3 * MSS_BYTES
-                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+                self.cwnd_bytes = min(self.ssthresh + 3 * MSS_BYTES, MAX_CWND)
                 self.state = STATE_FAST_RECOVERY
                 self.resend_missing_packet()
-
-            
-            # --- In Fast Recovery ---
             elif self.state == STATE_FAST_RECOVERY:
-                # [CUBIC] Unlike Reno, CUBIC does NOT inflate the window
-                # on subsequent DUP ACKs. It waits for the new ACK.
-                self.cwnd_bytes += MSS_BYTES
-                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-            
+                self.cwnd_bytes = min(self.cwnd_bytes + MSS_BYTES, MAX_CWND)
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
-            
             return "CONTINUE"
 
-        # --- 2. New ACK (Data is Acknowledged) ---
+        # New ACK (cumulative ack advanced)
         if cum_ack > self.base_seq_num:
             self.dup_ack_count = 0
-            
-            # Calculate RTT sample
-            ack_rtt_sample = -1
-            newly_acked_packets = []
-            
-            # [OPTIMIZATION] Use list() to allow deletion during iteration
+            newly_acked = []
             for seq in list(self.sent_packets.keys()):
-                 if seq < cum_ack:
-                    newly_acked_packets.append(seq)
-            
-            if newly_acked_packets:
-                newest_acked_seq = max(newly_acked_packets)
-                if newest_acked_seq in self.sent_packets:
-                    packet_data, send_time, retrans_count = self.sent_packets[newest_acked_seq]
+                if seq < cum_ack:
+                    newly_acked.append(seq)
+
+            acked_bytes = 0
+            if newly_acked:
+                newest = max(newly_acked)
+                if newest in self.sent_packets:
+                    packet_data, send_time, retrans_count = self.sent_packets[newest]
                     if retrans_count == 0:
                         ack_rtt_sample = time.time() - send_time
                         self.update_rto(ack_rtt_sample)
+                # accumulate acked bytes
+                for s in newly_acked:
+                    if s in self.sent_packets:
+                        packet_data, stime, rc = self.sent_packets[s]
+                        pkt_len = len(packet_data) - HEADER_SIZE
+                        if pkt_len < 0: pkt_len = 0
+                        acked_bytes += pkt_len
 
-            # Clean up sent_packets buffer
-            for seq_num in newly_acked_packets:
-                if seq_num in self.sent_packets:
-                    del self.sent_packets[seq_num]
-                self.sacked_packets.discard(seq_num)
+            # cleanup
+            for s in newly_acked:
+                if s in self.sent_packets:
+                    del self.sent_packets[s]
+                self.sacked_packets.discard(s)
 
-            # Update base
+            # record acked bytes for bandwidth estimator
+            if acked_bytes > 0:
+                self._record_acked_bytes(acked_bytes)
+
+            # update base
             self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
-            
-            # --- Update CWND (Reno/CUBIC Logic) ---
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, bw_est_Mbps={(self.bw_est_bytes_per_sec*8)/1e6:.3f}")
+
+            # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_FAST_RECOVERY:
-                # This ACK ends Fast Recovery
                 self.state = STATE_CONGESTION_AVOIDANCE
-            
+
             if self.state == STATE_SLOW_START:
-                # Exponential growth
-                self.cwnd_bytes += PAYLOAD_SIZE
-                self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-                
-                # Check for transition to Congestion Avoidance
-                if self.cwnd_bytes >= 128 * 1024:
+                self.cwnd_bytes = min(self.cwnd_bytes + PAYLOAD_SIZE, MAX_CWND)
+                # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
+                if self.cwnd_bytes >= 256 * 1024:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
-            
             elif self.state == STATE_CONGESTION_AVOIDANCE:
-                
                 if self.t_last_congestion == 0:
-                    # --- Reno-like AI (no congestion event yet) ---
-                    # Use float accumulator for: (MSS * MSS) / cwnd
+                    # Reno-like additive increase
                     if self.cwnd_bytes > 0:
-                        increment_frac = 1.5*(PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
-                        self.ack_credits += increment_frac
-                    
+                        inc = 1.2 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                        self.ack_credits += inc
                     if self.ack_credits >= 1.0:
-                        int_increment = int(self.ack_credits)
-                        self.cwnd_bytes += int_increment
-                        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-                        self.ack_credits -= int_increment
-                
+                        i = int(self.ack_credits)
+                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                        self.ack_credits -= i
                 else:
-                    # --- [OPTIMIZATION] CUBIC Growth (with TCP-Friendly) ---
-                    rtt_min_sec = INITIAL_RTO
-                    if self.rtt_min != float('inf'):
-                        rtt_min_sec = self.rtt_min
-                    elif self.srtt > 0:
-                        rtt_min_sec = self.srtt
-                    
-                    # t_elapsed = time since last congestion
+                    # CUBIC-like growth (retained as fallback)
+                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
                     t_elapsed = time.time() - self.t_last_congestion
-                    
-                    # 1. W_tcp(t) = Reno-friendly growth
-                    # alpha_cubic = 3 * beta / (2-beta)
                     alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
-                    # w_tcp = ssthresh + alpha_cubic * (t/RTT_min) * MSS
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                    
-                    # 2. W_cubic(t + RTT_min) = CUBIC growth target
                     t_target = t_elapsed + rtt_min_sec
                     t_minus_K = t_target - self.K
                     w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
-                    
-                    # 3. CUBIC target is max of TCP-friendly and CUBIC curve
                     target_cwnd = max(w_cubic_target, w_tcp)
-                    
-                    # 4. Calculate per-ACK increment
                     cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                    # Increment = (W_target(t+RTT) - W(t)) / (W(t)/MSS)
                     increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                    self.cwnd_bytes += increment_bytes
+                    # smooth update to avoid oscillation
+                    inertia = 0.86
+                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * (self.cwnd_bytes + increment_bytes)
                     self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
-                    # --- End Optimization ---
 
+            # After ack processing, also nudge cwnd toward rate-target (if estimator present)
+            self._apply_rate_targeting()
 
-            # Check if this ACK is the final EOF ACK
+            # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
                 print("Final EOF ACK received.")
                 if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                     self.log_cwnd()
                 return "DONE"
-        
+
+        # log changes
         if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
             self.log_cwnd()
-            
+
         return "CONTINUE"
 
+    # --- logging ---
+    def log_cwnd(self):
+        if not self.cwnd_log_file:
+            return
+        try:
+            ts = time.time() - self.start_time
+            self.cwnd_log_file.write(f"{ts:.4f},{int(self.cwnd_bytes)},{int(self.ssthresh)},{self.get_state_str()}\n")
+        except Exception:
+            pass
+
+    def plot_cwnd(self, log_filename):
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+        except Exception:
+            print("[Plotting] matplotlib not available.")
+            return
+        timestamps, cwnds_kb, ssth_kb, states = [], [], [], []
+        try:
+            with open(log_filename, 'r') as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    timestamps.append(float(row[0]))
+                    cwnds_kb.append(float(row[1]) / 1024.0)
+                    ssth_kb.append(float(row[2]) / 1024.0)
+                    states.append(row[3])
+        except Exception:
+            return
+        if not timestamps:
+            return
+        plt.figure(figsize=(10,5))
+        plt.plot(timestamps, cwnds_kb, drawstyle='steps-post', label='cwnd (KB)')
+        plt.plot(timestamps, ssth_kb, drawstyle='steps-post', linestyle='--', label='ssthresh (KB)')
+        plt.xlabel('Time (s)')
+        plt.ylabel('KB')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(f"cwnd_plot_{self.port}.png")
+        print(f"[Plotting] CWND plot saved to cwnd_plot_{self.port}.png")
+
+    # --- main run loop ---
+    def get_next_rto_delay(self):
+        if not self.sent_packets:
+            return 0.001
+        try:
+            oldest = next(iter(self.sent_packets))
+            _pkt, send_time, _ = self.sent_packets[oldest]
+            expiry = send_time + self.rto
+            delay = expiry - time.time()
+            return max(0.001, delay)
+        except StopIteration:
+            return 1.0
 
     def run(self):
-        """Main server loop."""
-        
         try:
             print("Waiting for client request...")
-            # [OPTIMIZATION] Use select to wait for the first packet
-            readable, _, _ = select.select([self.socket], [], [], 15.0) # 15s timeout
+            readable, _, _ = select.select([self.socket], [], [], 15.0)
             if not readable:
                 print("Timed out waiting for initial client.")
                 self.socket.close()
                 return
-                
             packet, self.client_addr = self.socket.recvfrom(1024)
             print(f"Client connected from {self.client_addr}")
-            
         except Exception as e:
             print(f"Error receiving initial request: {e}")
             self.socket.close()
             return
-            
+
         self.start_time = time.time()
         self.last_ack_time = self.start_time
 
         try:
-            self.cwnd_log_file = open(self.log_filename, "w", buffering=1) 
+            self.cwnd_log_file = open(self.log_filename, "w", buffering=1)
             self.cwnd_log_file.write("timestamp_s,cwnd_bytes,ssthresh_bytes,state\n")
             print(f"Logging CWND to {self.log_filename}")
             self.log_cwnd()
-        except IOError as e:
-            print(f"Error: Could not open log file {self.log_filename}: {e}")
+        except IOError:
             self.cwnd_log_file = None
 
         running = True
-        
-        # [OPTIMIZATION] New select-based main loop
         while running:
             if self.connection_dead:
                 print("Connection dead, shutting down.")
                 running = False
                 break
-            
-            # 1. Calculate select timeout based on the next RTO
             timeout_delay = self.get_next_rto_delay()
-            
             try:
-                # 2. Wait for ACK or for RTO to expire
                 readable, _, _ = select.select([self.socket], [], [], timeout_delay)
-                
-                # 3. If an ACK arrived, process it
                 if readable:
                     ack_packet, _ = self.socket.recvfrom(MSS_BYTES)
                     if self.process_incoming_ack(ack_packet) == "DONE":
                         running = False
-                        
             except socket.error as e:
-                # Ignore non-blocking errors
                 if e.errno not in [11, 35, 10035]:
                     print(f"Socket error in main loop: {e}")
                     running = False
             except Exception as e:
                 print(f"Error in main loop: {e}")
-                time.sleep(0.001) # Avoid busy-spin on other errors
+                time.sleep(0.001)
                 running = False
 
             if not running:
                 break
-            
-            # 4. Handle any RTOs that may have expired
+
             self.handle_timeouts()
-            
-            # 5. Send new data if cwnd allows
             self.send_new_data()
 
-            # 6. Check for client inactivity
-            # *** MISTAKE 2 (FIX) ***
-            # Changed timeout from 1e2 (100s) to 15.0s
             if time.time() - self.last_ack_time > 30.0:
-                print("Client timed out (15s). Shutting down.")
+                print("Client timed out (30s). Shutting down.")
                 running = False
-        # --- End Optimization Loop ---
 
-
-        # --- Transfer Finished ---
+        # finish
         end_time = time.time()
         duration = end_time - self.start_time
-        if duration == 0: duration = 1e-6 
-        
-        throughput = (self.file_size * 8) / (duration * 1_000_000) # Mbps
+        if duration == 0:
+            duration = 1e-6
+        throughput = (self.file_size * 8) / (duration * 1_000_000)
         print("---------------------------------")
         print("File transfer complete.")
         print(f"Duration: {duration:.2f} seconds")
@@ -734,20 +597,17 @@ class Server:
             self.cwnd_log_file.close()
             print(f"CWND log saved to {self.log_filename}")
             self.plot_cwnd(self.log_filename)
-        
-        time.sleep(1)
+        time.sleep(0.5)
         self.socket.close()
 
 def main():
     if len(sys.argv) != 3:
         print("Usage: python3 p2_server.py <SERVER_IP> <SERVER_PORT>")
         sys.exit(1)
-    
     server_ip = sys.argv[1]
     server_port = int(sys.argv[2])
-    
-    server = Server(server_ip, server_port)
-    server.run()
+    s = Server(server_ip, server_port)
+    s.run()
 
 if __name__ == "__main__":
     main()
