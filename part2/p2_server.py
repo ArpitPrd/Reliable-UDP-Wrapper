@@ -102,8 +102,6 @@ class Server:
         self.cwnd_log_file = None
         self.log_filename = f"cwnd_log_{self.port}.csv"
 
-        self.last_fast_retransmit_time = 0.0
-
     # --- helpers ---
     def get_state_str(self):
         if self.state == STATE_SLOW_START: return "SS"
@@ -210,20 +208,6 @@ class Server:
         oldest = timed[0]
         if not self.resend_packet(oldest):
             return
-        
-        # --- NEW: Guard Clause ---
-        # Use a safe estimate for one RTT (srtt or MIN_RTO)
-        rtt_estimate = max(self.srtt, MIN_RTO) 
-        
-        # If we had a fast retransmit recently, don't punish the window again.
-        # Just resend and back-off the RTO.
-        if (now - self.last_fast_retransmit_time) < (rtt_estimate * 0.9):
-            print("[TIMEOUT] RTO fired, but Fast Retransmit just ran. Only backing off RTO.")
-            self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
-            self.dup_ack_count = 0
-            return # Skip the window reduction
-        # --- End of New Code ---
-
         print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
         print("Timeout (RTO). Reducing window (NOT resetting to 1).")
         
@@ -331,8 +315,6 @@ class Server:
             
             if self.dup_ack_count == 3:
                 print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
-
-                self.last_fast_retransmit_time = time.time()
                 
                 # This function sets ssthresh = cwnd * beta_cubic (0.7) 
                 # and resets the CUBIC growth curve.
@@ -392,16 +374,7 @@ class Server:
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
-                    
-                    # --- FIX: Start CUBIC clock immediately ---
-                    # This ensures we use the RTT-independent CUBIC growth
-                    # logic *even before* the first loss event.
-                    if self.t_last_congestion == 0:
-                        # Set w_max to the *current* cwnd (which is ssthresh)
-                        self.w_max_bytes = self.cwnd_bytes 
-                        # Start the CUBIC clock
-                        self.enter_cubic_congestion_avoidance() 
-                    # --- End of Fix ---
+                    self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 if self.t_last_congestion == 0:
                     # Reno-like additive increase
@@ -427,15 +400,7 @@ class Server:
                     w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
 
                     # The target cwnd is the larger of the two
-                    # --- FIX ---
-                    # Default to the CUBIC target
-                    target_cwnd = w_cubic_now
-
-                    # But, if CUBIC's target is *less* than Reno's,
-                    # be "friendly" and use Reno's target.
-                    # if target_cwnd < w_tcp:
-                    #     target_cwnd = w_tcp
-                    # --- End of Fix ---
+                    target_cwnd = max(w_cubic_now, w_tcp)
                     target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
 
                     # --- THIS IS THE FIX ---

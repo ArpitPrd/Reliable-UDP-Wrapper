@@ -67,7 +67,7 @@ class Server:
         # offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = (6) * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  512
+        self.ssthresh =  128 * MSS_BYTES
 
         # RTO
         self.rto = INITIAL_RTO
@@ -88,8 +88,8 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 0.25
-        self.beta_cubic = 1.0
+        self.C = 0.4
+        self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -406,19 +406,19 @@ class Server:
                     # --- THIS IS THE FIX ---
                     # Now, grow towards the target_cwnd using the ack_credits system.
                     
-                    inc_per_rtt = 0.0
+                    inc_per_ack = 0.0 # <-- Renamed variable for clarity
                     if self.cwnd_bytes < target_cwnd:
                         # We are below the target, grow fast.
-                        # Increment is (target - current) / (current / MSS)
-                        # This scales the growth to be faster as the gap is larger
-                        inc_per_rtt = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                        # This formula *is* the per-ACK increment.
+                        inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                     else:
                         # We are at or above the target (e.g., in the "concave" region)
                         # Just do standard additive increase.
-                        inc_per_rtt = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
+                        inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
 
-                    # Scale the RTT-based increment to a per-ACK increment
-                    inc_per_ack = inc_per_rtt * PAYLOAD_SIZE / self.cwnd_bytes
+                    # --- FIX ---
+                    # The variable 'inc_per_ack' is already the per-ACK increment.
+                    # Do not scale it again.
                     self.ack_credits += inc_per_ack
 
                     # Apply the credits
