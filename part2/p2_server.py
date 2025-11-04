@@ -440,38 +440,35 @@ class Server:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
-                if self.t_last_congestion == 0:
-                    # Reno-like additive increase
-                    if self.cwnd_bytes > 0:
-                        inc = 1.2 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
-                        self.ack_credits += inc
-                    if self.ack_credits >= 1.0:
-                        i = int(self.ack_credits)
-                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                        self.ack_credits -= i
-                else:
-                    # CUBIC-like growth (retained as fallback)
-                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
-                    t_elapsed = time.time() - self.t_last_congestion
-                    alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
-                    w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                    t_target = t_elapsed + rtt_min_sec
-                    t_minus_K = t_target - self.K
-                    w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
-                    target_cwnd = max(w_cubic_target, w_tcp)
-                    cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                    increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                    
-                    # --- THIS IS THE KEY CHANGE ---
-                    # The old logic was (0.86 * cwnd) + (0.14 * (cwnd + inc)), 
-                    # which is cwnd + (0.14 * inc). This applies only 14% of
-                    # the calculated growth and is EXTREMELY slow.
-                    #
-                    # We will replace it with a direct blend between the
-                    # current cwnd and the CUBIC target.
-                    inertia = 0.5 # Make this 0.5 (or even 0.2) for faster response
-                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
-                    self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+                # --- PURE CUBIC LOGIC ---
+                # We removed the `if self.t_last_congestion == 0:` block 
+                # which was a trace of Reno. CUBIC growth is used always.
+                
+                # CUBIC growth function
+                rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
+                t_elapsed = time.time() - self.t_last_congestion
+                
+                # 1. Calculate TCP-friendly (Reno) growth target
+                alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
+                w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
+                
+                # 2. Calculate CUBIC growth target
+                t_target = t_elapsed + rtt_min_sec
+                t_minus_K = t_target - self.K
+                w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
+                
+                # 3. Choose the larger of the two (this is CUBIC's hybrid mode)
+                target_cwnd = max(w_cubic_target, w_tcp)
+                
+                # 4. Calculate the increment per ACK
+                # This logic is correct: it finds the total to grow in 1 RTT
+                # and divides it by the number of ACKs expected in 1 RTT.
+                cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
+                increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
+                
+                # 5. Apply the increment (THIS IS THE SECOND FIX)
+                # We REMOVE the "inertia" blend and apply the increment directly.
+                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
             # self._apply_rate_targeting()
