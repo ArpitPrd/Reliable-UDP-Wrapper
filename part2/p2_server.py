@@ -47,7 +47,7 @@ class Server:
         self.socket.setblocking(False)
         self.client_addr = None
         self.in_rto_recovery = False
-        self.startup_delay = random.uniform(0, 0.005)
+        self.startup_delay = random.uniform(0, 0.002)
         print(f"Server started on {self.ip}:{self.port}")
 
         # load file
@@ -68,7 +68,7 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = (6) * MSS_BYTES
+        self.cwnd_bytes = 10 * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
         self.ssthresh =  128 * MSS_BYTES
 
@@ -266,7 +266,15 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                time.sleep(0.0005)
+                inflight = self.next_seq_num - self.base_seq_num
+                if self.cwnd_bytes > 0:
+                    inflight_ratio = float(inflight) / float(self.cwnd_bytes)
+                else:
+                    inflight_ratio = 0.0
+
+                # If channel not filled yet (inflight < 0.8*cwnd) do no sleep; otherwise small sleep
+                if inflight_ratio >= 0.8:
+                    time.sleep(0.00008)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
@@ -419,18 +427,17 @@ class Server:
                     # Now, grow towards the target_cwnd using the ack_credits system.
                     
                     inc_per_ack = 0.0 # <-- Renamed variable for clarity
+                    srtt_est = max(self.srtt, rtt_min_sec)         # avoid zero
+                    rtt_comp = srtt_est / rtt_min_sec             # >=1 for higher-RTT flows
+
                     if self.cwnd_bytes < target_cwnd:
-                        # We are below the target, grow fast.
-                        # This formula *is* the per-ACK increment.
                         inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                     else:
-                        # We are at or above the target (e.g., in the "concave" region)
-                        # Just do standard additive increase.
                         inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
 
-                    # --- FIX ---
-                    # The variable 'inc_per_ack' is already the per-ACK increment.
-                    # Do not scale it again.
+                    # apply RTT compensation
+                    inc_per_ack *= rtt_comp
+
                     self.ack_credits += inc_per_ack
 
                     # Apply the credits
