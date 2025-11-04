@@ -25,14 +25,14 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-# STATE_FAST_RECOVERY = 3
+STATE_FAST_RECOVERY = 3
 
 # RTO constants
 ALPHA = 0.125
 BETA = 0.25
 K = 4.0
-INITIAL_RTO = 0.06  # <-- Set to 60ms (closer to 40ms RTT)
-MIN_RTO = 0.035
+INITIAL_RTO = 0.2  # <-- Set to 60ms (closer to 40ms RTT)
+MIN_RTO = 0.05
 
 
 # Rate estimator window (seconds)
@@ -309,30 +309,41 @@ class Server:
                 self.sacked_packets.add(sack_start)
 
         # Duplicate ACK
-        if cum_ack == self.base_seq_num:
-            self.dup_ack_count += 1
-            
-            if self.dup_ack_count == 3:
-                print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
-                
-                # This function sets ssthresh = cwnd * beta_cubic (0.7) 
-                # and resets the CUBIC growth curve.
-                self.enter_cubic_congestion_avoidance() 
-                
-                # Set the new cwnd to the new ssthresh (multiplicative decrease).
-                self.cwnd_bytes = self.ssthresh
-                
+        if cum_ack > self.base_seq_num:
+            self.dup_ack_count = 0
+            # ... (calculating newly_acked, acked_bytes, RTO update is all the same) ...
+
+            # update base
+            self.base_seq_num = cum_ack
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
+
+            # --- FIX 2: Update cwnd logic based on state ---
+            if self.state == STATE_FAST_RECOVERY:
+                # 1. This is the ACK for our retransmission. Exit Fast Recovery.
+                print("Exiting Fast Recovery.")
+                self.cwnd_bytes = self.ssthresh # Deflate window
                 self.state = STATE_CONGESTION_AVOIDANCE
-
-                # We STAY in STATE_CONGESTION_AVOIDANCE.
-                self.resend_missing_packet()
-            
-            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
-            # new ACK to signal recovery from this loss event.
-
-            if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
-                self.log_cwnd()
-            return "CONTINUE"
+                self.enter_cubic_congestion_avoidance() # Reset CUBIC's clock
+            elif self.state == STATE_SLOW_START:
+                # 2. Original Slow Start logic (unchanged)
+                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
+                if self.cwnd_bytes >= self.ssthresh:
+                    self.state = STATE_CONGESTION_AVOIDANCE
+                    self.enter_cubic_congestion_avoidance()
+            elif self.state == STATE_CONGESTION_AVOIDANCE:
+                # 3. Original CUBIC growth logic (unchanged)
+                rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
+                # ... (rest of CUBIC math is unchanged) ...
+                t_elapsed = time.time() - self.t_last_congestion
+                alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
+                w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
+                t_target = t_elapsed + rtt_min_sec
+                t_minus_K = t_target - self.K
+                w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
+                target_cwnd = max(w_cubic_target, w_tcp)
+                cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
+                increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
+                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
 
         # New ACK (cumulative ack advanced)
         if cum_ack > self.base_seq_num:
