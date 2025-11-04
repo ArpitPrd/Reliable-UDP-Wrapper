@@ -93,7 +93,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.3
-        self.beta_cubic = 0.8
+        self.beta_cubic = 0.9
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
