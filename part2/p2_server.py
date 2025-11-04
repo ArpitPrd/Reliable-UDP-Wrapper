@@ -216,15 +216,21 @@ class Server:
         # Only reduce t`he window ONCE per RTO event.
         # Do not enter the spiral.
         if not self.in_rto_recovery:
-            print("[TIMEOUT] RTO. Reducing window (CUBIC style) ONCE.")
+            print("[TIMEOUT] RTO. Resetting to Slow Start.")
             self.in_rto_recovery = True # Set the flag!
 
-            # This is your existing reduction logic
-            self.enter_cubic_congestion_avoidance()
-            self.cwnd_bytes = self.ssthresh
-            self.state = STATE_CONGESTION_AVOIDANCE
-            self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND)
-            self.ssthresh = max(self.ssthresh, MIN_CWND)
+            # This is the standard TCP response to an RTO:
+            
+            # 1. Record the current window and set the new ssthresh.
+            #    This function already does this (ssthresh = cwnd * 0.85)
+            self.enter_cubic_congestion_avoidance() 
+            
+            # 2. Reset the cwnd to a safe, small value.
+            self.cwnd_bytes = MIN_CWND
+            
+            # 3. Re-enter Slow Start to probe for the new capacity.
+            self.state = STATE_SLOW_START
+            
             self.log_cwnd()
 
         self.rto = min(self.rto * 1.25, 1.5) # Back off RTO timer
