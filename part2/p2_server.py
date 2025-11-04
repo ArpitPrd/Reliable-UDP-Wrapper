@@ -99,10 +99,6 @@ class Server:
         self.t_last_congestion = 0.0
         self.K = 0.0
 
-        # bandwidth estimator: deque of (timestamp, bytes_acked)
-        self.acked_history = deque()
-        self.bw_est_bytes_per_sec = 0.0
-
         # initial deterministic phase offset used in enter_cubic
         self.phase_offset = (self.port % 5) * 0.025
 
@@ -374,7 +370,7 @@ class Server:
 
             # update base
             self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, bw_est_Mbps={(self.bw_est_bytes_per_sec*8)/1e6:.3f}")
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
 
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
