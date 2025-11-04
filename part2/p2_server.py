@@ -33,9 +33,9 @@ STATE_CONGESTION_AVOIDANCE = 2
 STATE_FAST_RECOVERY = 3
 
 # --- RTO Calculation Constants ---
-ALPHA = 0.1
-BETA = 0.2
-K = 1.5
+ALPHA = 0.05
+BETA = 0.1
+K = 1.25
 INITIAL_RTO = 0.15
 MIN_RTO = 0.05
 
@@ -70,7 +70,9 @@ class Server:
         
         # --- Congestion Control (Reno/CUBIC) ---
         self.state = STATE_SLOW_START
-        self.cwnd_bytes = (6 + (self.port % 5) * 1.5) * MSS_BYTES   # Congestion window in bytes
+        offset_factor = (self.port % 7) / 7.0
+        self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES   # Congestion window in bytes
+        self.startup_delay = offset_factor * 0.004
         self.ssthresh = 2 * 1024 * 1024 * 1024 # 2 GB
         
         # --- RTO Calculation ---
@@ -417,6 +419,8 @@ class Server:
         inflight = self.next_seq_num - self.base_seq_num
 
         while inflight < self.cwnd_bytes:
+            if self.startup_delay > 0:
+                time.sleep(self.startup_delay)
             if self.connection_dead:
                 break
 
@@ -565,9 +569,9 @@ class Server:
                 self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
                 
                 # Check for transition to Congestion Avoidance
-                if self.cwnd_bytes >= self.ssthresh * 0.9:
+                if self.cwnd_bytes >= 128 * 1024:
                     self.state = STATE_CONGESTION_AVOIDANCE
-                    self.cwnd_bytes = min(self.cwnd_bytes, self.ssthresh)
+                    self.enter_cubic_congestion_avoidance()
             
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 
