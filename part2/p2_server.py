@@ -391,7 +391,7 @@ class Server:
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
-                    # self.enter_cubic_congestion_avoidance()
+                    self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 if self.t_last_congestion == 0:
                     # Reno-like additive increase
