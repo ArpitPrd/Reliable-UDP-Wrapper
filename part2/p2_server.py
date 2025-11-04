@@ -28,10 +28,10 @@ STATE_CONGESTION_AVOIDANCE = 2
 STATE_FAST_RECOVERY = 3
 
 # RTO constants
-ALPHA = 0.05
-BETA = 0.1
-K = 1.25
-INITIAL_RTO = 0.15
+ALPHA = 0.125  # Standard: 1/8
+BETA = 0.25    # Standard: 1/4
+K = 4.0        # Standard: 4
+INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
 # Bandwidth->target util mapping (from user's benchmark)
@@ -452,9 +452,16 @@ class Server:
                     target_cwnd = max(w_cubic_target, w_tcp)
                     cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
                     increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                    # smooth update to avoid oscillation
-                    inertia = 0.86
-                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * (self.cwnd_bytes + increment_bytes)
+                    
+                    # --- THIS IS THE KEY CHANGE ---
+                    # The old logic was (0.86 * cwnd) + (0.14 * (cwnd + inc)), 
+                    # which is cwnd + (0.14 * inc). This applies only 14% of
+                    # the calculated growth and is EXTREMELY slow.
+                    #
+                    # We will replace it with a direct blend between the
+                    # current cwnd and the CUBIC target.
+                    inertia = 0.5 # Make this 0.5 (or even 0.2) for faster response
+                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
                     self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
