@@ -217,7 +217,7 @@ class Server:
         
         # If we had a fast retransmit recently, don't punish the window again.
         # Just resend and back-off the RTO.
-        if (now - self.last_fast_retransmit_time) < (rtt_estimate * 0.8):
+        if (now - self.last_fast_retransmit_time) < (rtt_estimate * 1.5):
             print("[TIMEOUT] RTO fired, but Fast Retransmit just ran. Only backing off RTO.")
             self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
             self.dup_ack_count = 0
