@@ -30,7 +30,7 @@ STATE_CONGESTION_AVOIDANCE = 2
 # RTO constants
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
-K = 4.0        # Standard: 4
+K = 5.0        # Standard: 4
 INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
