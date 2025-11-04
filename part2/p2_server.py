@@ -424,8 +424,8 @@ class Server:
 
                     # But, if CUBIC's target is *less* than Reno's,
                     # be "friendly" and use Reno's target.
-                    if target_cwnd < w_tcp:
-                        target_cwnd = w_tcp
+                    # if target_cwnd < w_tcp:
+                    #     target_cwnd = w_tcp
                     # --- End of Fix ---
                     target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
 

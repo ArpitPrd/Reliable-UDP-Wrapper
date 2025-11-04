@@ -299,7 +299,7 @@ def experiment_varying_loss(exp_out, num_iterations=1):
 
 
 def experiment_asymmetric_flows(exp_out, num_iterations=1):
-    for delay_c2 in range(5, 26, 5):  
+    for delay_c2 in range(25, 26, 5):  
         for i in range(num_iterations):
             run_trial(exp_out, bw=100, delay_c2_ms=delay_c2,iteration=i,buffer_size=420)
 
