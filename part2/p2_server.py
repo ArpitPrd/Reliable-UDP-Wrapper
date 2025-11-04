@@ -36,7 +36,7 @@ INITIAL_RTO = 0.25 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
 # Minimum cwnd in bytes (stay able to probe)
-MIN_CWND = 8 * MSS_BYTES
+MIN_CWND = 4 * MSS_BYTES
 
 class Server:
     def __init__(self, ip, port):
@@ -47,7 +47,7 @@ class Server:
         self.socket.setblocking(False)
         self.client_addr = None
         self.in_rto_recovery = False
-        self.startup_delay = random.uniform(0, 0.002)
+        self.startup_delay = random.uniform(0, 0.005)
         print(f"Server started on {self.ip}:{self.port}")
 
         # load file
@@ -68,7 +68,7 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = 10 * MSS_BYTES
+        self.cwnd_bytes = (6) * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
         self.ssthresh =  128 * MSS_BYTES
 
@@ -197,8 +197,6 @@ class Server:
         num = w_mss * (1.0 - self.beta_cubic) / max(self.C, 1e-9)
         self.K = (num ** (1.0/3.0)) if num > 0 else 0.0
         
-        self.cwnd_bytes = int(self.cwnd_bytes * 1.1)
-        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
 
     # --- timeouts ---
     def handle_timeouts(self):
@@ -267,15 +265,7 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                inflight = self.next_seq_num - self.base_seq_num
-                if self.cwnd_bytes > 0:
-                    inflight_ratio = float(inflight) / float(self.cwnd_bytes)
-                else:
-                    inflight_ratio = 0.0
-
-                # If channel not filled yet (inflight < 0.8*cwnd) do no sleep; otherwise small sleep
-                if inflight_ratio >= 0.8:
-                    time.sleep(0.00005)
+                time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
@@ -428,18 +418,18 @@ class Server:
                     # Now, grow towards the target_cwnd using the ack_credits system.
                     
                     inc_per_ack = 0.0 # <-- Renamed variable for clarity
-                    srtt_est = max(self.srtt, rtt_min_sec)
-                    rtt_comp = srtt_est / rtt_min_sec
-                    rtt_comp = min(rtt_comp, 2.0)
-
                     if self.cwnd_bytes < target_cwnd:
+                        # We are below the target, grow fast.
+                        # This formula *is* the per-ACK increment.
                         inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                     else:
+                        # We are at or above the target (e.g., in the "concave" region)
+                        # Just do standard additive increase.
                         inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
 
-                    # apply RTT compensation
-                    inc_per_ack *= rtt_comp
-
+                    # --- FIX ---
+                    # The variable 'inc_per_ack' is already the per-ACK increment.
+                    # Do not scale it again.
                     self.ack_credits += inc_per_ack
 
                     # Apply the credits
@@ -461,7 +451,7 @@ class Server:
         # log changes
         if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
             self.log_cwnd()
-        self.cwnd_bytes = int(0.8 * old_cwnd + 0.2 * self.cwnd_bytes)
+
         return "CONTINUE"
 
     # --- logging ---
