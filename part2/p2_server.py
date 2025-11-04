@@ -25,15 +25,29 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-STATE_FAST_RECOVERY = 3
+# STATE_FAST_RECOVERY = 3
 
 # RTO constants
-ALPHA = 0.125
-BETA = 0.25
-K = 4.0
-INITIAL_RTO = 0.2  # <-- Set to 60ms (closer to 40ms RTT)
+ALPHA = 0.125  # Standard: 1/8
+BETA = 0.25    # Standard: 1/4
+K = 4.0        # Standard: 4
+INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
+# Bandwidth->target util mapping (from user's benchmark)
+# (bandwidth_mbps, target_util)
+BANDWIDTH_UTIL_TABLE = [
+    (100, 0.54),
+    (200, 0.29),
+    (300, 0.19),
+    (400, 0.17),
+    (500, 0.13),
+    (600, 0.10),
+    (700, 0.10),
+    (800, 0.058),
+    (900, 0.055),
+    (1000, 0.056)
+]
 
 # Rate estimator window (seconds)
 BW_WINDOW = 0.5  # 500 ms for smoothing and reactivity
@@ -98,6 +112,10 @@ class Server:
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
         self.K = 0.0
+
+        # bandwidth estimator: deque of (timestamp, bytes_acked)
+        self.acked_history = deque()
+        self.bw_est_bytes_per_sec = 0.0
 
         # initial deterministic phase offset used in enter_cubic
         self.phase_offset = (self.port % 5) * 0.025
@@ -232,6 +250,43 @@ class Server:
         self.dup_ack_count = 0
         self.log_cwnd()
 
+    # --- bandwidth estimator & cwnd targeter ---
+    def _record_acked_bytes(self, bytes_acked):
+        now = time.time()
+        self.acked_history.append((now, bytes_acked))
+        # prune
+        cutoff = now - BW_WINDOW
+        total = 0
+        while self.acked_history and self.acked_history[0][0] < cutoff:
+            self.acked_history.popleft()
+        total = sum(x[1] for x in self.acked_history)
+        self.bw_est_bytes_per_sec = total / BW_WINDOW
+
+    def _choose_target_util(self):
+        # bw_est in Bps -> convert to Mbps
+        est_mbps = (self.bw_est_bytes_per_sec * 8) / 1_000_000.0
+        if est_mbps <= 0:
+            # fallback default
+            return 0.5
+        # find closest table bw
+        best = min(BANDWIDTH_UTIL_TABLE, key=lambda x: abs(x[0] - est_mbps))
+        return best[1]
+
+    def _apply_rate_targeting(self):
+        # If we have srtt and bw_est, compute target cwnd = bw_bytes_per_sec * srtt * util
+        if self.srtt <= 0 or self.bw_est_bytes_per_sec <= 0:
+            return
+        util = self._choose_target_util()
+        target_cwnd = self.bw_est_bytes_per_sec * max(self.srtt, 0.001) * util
+        # blend smoothly
+        inertia = 0.88  # higher = smoother (0.8-0.95)
+        # ensure target at least MIN_CWND
+        target_cwnd = max(target_cwnd, MIN_CWND)
+        # move cwnd toward target
+        self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
+        self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
+        # keep a floor
+        self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
 
     # --- send logic ---
     def get_next_content(self):
@@ -254,6 +309,8 @@ class Server:
         if inflight == 0 and self.startup_delay > 0:
             time.sleep(self.startup_delay)
 
+        # apply rate targeting on each send cycle if we have an estimator
+        # self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -309,41 +366,30 @@ class Server:
                 self.sacked_packets.add(sack_start)
 
         # Duplicate ACK
-        if cum_ack > self.base_seq_num:
-            self.dup_ack_count = 0
-            # ... (calculating newly_acked, acked_bytes, RTO update is all the same) ...
-
-            # update base
-            self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
-
-            # --- FIX 2: Update cwnd logic based on state ---
-            if self.state == STATE_FAST_RECOVERY:
-                # 1. This is the ACK for our retransmission. Exit Fast Recovery.
-                print("Exiting Fast Recovery.")
-                self.cwnd_bytes = self.ssthresh # Deflate window
+        if cum_ack == self.base_seq_num:
+            self.dup_ack_count += 1
+            
+            if self.dup_ack_count == 3:
+                print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
+                
+                # This function sets ssthresh = cwnd * beta_cubic (0.7) 
+                # and resets the CUBIC growth curve.
+                self.enter_cubic_congestion_avoidance() 
+                
+                # Set the new cwnd to the new ssthresh (multiplicative decrease).
+                self.cwnd_bytes = self.ssthresh
+                
                 self.state = STATE_CONGESTION_AVOIDANCE
-                self.enter_cubic_congestion_avoidance() # Reset CUBIC's clock
-            elif self.state == STATE_SLOW_START:
-                # 2. Original Slow Start logic (unchanged)
-                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
-                if self.cwnd_bytes >= self.ssthresh:
-                    self.state = STATE_CONGESTION_AVOIDANCE
-                    self.enter_cubic_congestion_avoidance()
-            elif self.state == STATE_CONGESTION_AVOIDANCE:
-                # 3. Original CUBIC growth logic (unchanged)
-                rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
-                # ... (rest of CUBIC math is unchanged) ...
-                t_elapsed = time.time() - self.t_last_congestion
-                alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
-                w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                t_target = t_elapsed + rtt_min_sec
-                t_minus_K = t_target - self.K
-                w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
-                target_cwnd = max(w_cubic_target, w_tcp)
-                cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
+
+                # We STAY in STATE_CONGESTION_AVOIDANCE.
+                self.resend_missing_packet()
+            
+            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
+            # new ACK to signal recovery from this loss event.
+
+            if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
+                self.log_cwnd()
+            return "CONTINUE"
 
         # New ACK (cumulative ack advanced)
         if cum_ack > self.base_seq_num:
@@ -375,10 +421,14 @@ class Server:
                     del self.sent_packets[s]
                 self.sacked_packets.discard(s)
 
+            # record acked bytes for bandwidth estimator
+            if acked_bytes > 0:
+                self._record_acked_bytes(acked_bytes)
 
             # update base
             self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
+            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, bw_est_Mbps={(self.bw_est_bytes_per_sec*8)/1e6:.3f}")
+
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
                 # Correct exponential growth: increase by the amount of data
@@ -390,36 +440,41 @@ class Server:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
-                # --- PURE CUBIC LOGIC ---
-                # We removed the `if self.t_last_congestion == 0:` block 
-                # which was a trace of Reno. CUBIC growth is used always.
-                
-                # CUBIC growth function
-                rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
-                t_elapsed = time.time() - self.t_last_congestion
-                
-                # 1. Calculate TCP-friendly (Reno) growth target
-                alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
-                w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                
-                # 2. Calculate CUBIC growth target
-                t_target = t_elapsed + rtt_min_sec
-                t_minus_K = t_target - self.K
-                w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
-                
-                # 3. Choose the larger of the two (this is CUBIC's hybrid mode)
-                target_cwnd = max(w_cubic_target, w_tcp)
-                
-                # 4. Calculate the increment per ACK
-                # This logic is correct: it finds the total to grow in 1 RTT
-                # and divides it by the number of ACKs expected in 1 RTT.
-                cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
-                
-                # 5. Apply the increment (THIS IS THE SECOND FIX)
-                # We REMOVE the "inertia" blend and apply the increment directly.
-                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
+                if self.t_last_congestion == 0:
+                    # Reno-like additive increase
+                    if self.cwnd_bytes > 0:
+                        inc = 1.2 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                        self.ack_credits += inc
+                    if self.ack_credits >= 1.0:
+                        i = int(self.ack_credits)
+                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                        self.ack_credits -= i
+                else:
+                    # CUBIC-like growth (retained as fallback)
+                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
+                    t_elapsed = time.time() - self.t_last_congestion
+                    alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
+                    w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
+                    t_target = t_elapsed + rtt_min_sec
+                    t_minus_K = t_target - self.K
+                    w_cubic_target = self.C * (t_minus_K ** 3) + self.w_max_bytes
+                    target_cwnd = max(w_cubic_target, w_tcp)
+                    cwnd_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
+                    increment_bytes = (target_cwnd - self.cwnd_bytes) / cwnd_pkts
+                    
+                    # --- THIS IS THE KEY CHANGE ---
+                    # The old logic was (0.86 * cwnd) + (0.14 * (cwnd + inc)), 
+                    # which is cwnd + (0.14 * inc). This applies only 14% of
+                    # the calculated growth and is EXTREMELY slow.
+                    #
+                    # We will replace it with a direct blend between the
+                    # current cwnd and the CUBIC target.
+                    inertia = 0.5 # Make this 0.5 (or even 0.2) for faster response
+                    self.cwnd_bytes = inertia * self.cwnd_bytes + (1 - inertia) * target_cwnd
+                    self.cwnd_bytes = min(self.cwnd_bytes, MAX_CWND)
 
+            # After ack processing, also nudge cwnd toward rate-target (if estimator present)
+            # self._apply_rate_targeting()
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
