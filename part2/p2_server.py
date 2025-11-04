@@ -379,8 +379,6 @@ class Server:
                 # Set the new cwnd to the new ssthresh (multiplicative decrease).
                 self.cwnd_bytes = self.ssthresh
                 
-                self.state = STATE_CONGESTION_AVOIDANCE
-
                 # We STAY in STATE_CONGESTION_AVOIDANCE.
                 self.resend_missing_packet()
             
@@ -431,11 +429,8 @@ class Server:
 
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
-                # Correct exponential growth: increase by the amount of data
-                # that was just acknowledged.
-                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
-                
-                # Correctly transition to Congestion Avoidance when cwnd > ssthresh
+                self.cwnd_bytes = min(self.cwnd_bytes + PAYLOAD_SIZE, MAX_CWND)
+                # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
