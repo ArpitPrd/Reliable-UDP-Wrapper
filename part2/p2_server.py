@@ -372,7 +372,7 @@ class Server:
             if self.state == STATE_SLOW_START:
                 # Correct exponential growth: increase by the amount of data
                 # that was just acknowledged.
-                # self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
+                self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
                 
                 # Correctly transition to Congestion Avoidance when cwnd > ssthresh
                 if self.cwnd_bytes >= self.ssthresh:
@@ -407,7 +407,7 @@ class Server:
                 
                 # 5. Apply the increment (THIS IS THE SECOND FIX)
                 # We REMOVE the "inertia" blend and apply the increment directly.
-                # self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
+                self.cwnd_bytes = min(self.cwnd_bytes + increment_bytes, MAX_CWND)
 
 
             # final check for EOF ack
