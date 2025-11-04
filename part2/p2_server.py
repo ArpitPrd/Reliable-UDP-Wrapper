@@ -71,7 +71,7 @@ class Server:
         offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = (6 + 4 * offset_factor) * MSS_BYTES
         self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh = 32 * 1024
+        self.ssthresh =  1024
 
         # RTO
         self.rto = INITIAL_RTO
