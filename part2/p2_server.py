@@ -265,7 +265,7 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                time.sleep(0.0005)
+                # time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
