@@ -45,6 +45,7 @@ class Server:
         self.socket.bind((self.ip, self.port))
         self.socket.setblocking(False)
         self.client_addr = None
+        self.in_rto_recovery = False
         print(f"Server started on {self.ip}:{self.port}")
 
         # load file
@@ -208,28 +209,23 @@ class Server:
         oldest = timed[0]
         if not self.resend_packet(oldest):
             return
-        print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
-        print("Timeout (RTO). Reducing window (NOT resetting to 1).")
-        
-        # This is the CUBIC response (beta_cubic = 0.7)
-        # This sets self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
-        # It also resets the CUBIC clock.
-        self.enter_cubic_congestion_avoidance()
+        # --- THIS IS THE FIX ---
+        # Only reduce t`he window ONCE per RTO event.
+        # Do not enter the spiral.
+        if not self.in_rto_recovery:
+            print("[TIMEOUT] RTO. Reducing window (CUBIC style) ONCE.")
+            self.in_rto_recovery = True # Set the flag!
 
-        # --- THIS IS THE KEY CHANGE ---
-        # DO NOT reset cwnd to 1 MSS. This is catastrophic for performance.
-        # Instead, set cwnd to the new ssthresh (which is 0.7 * old_cwnd) 
-        # and enter Congestion Avoidance directly.
-        self.cwnd_bytes = self.ssthresh
-        self.state = STATE_CONGESTION_AVOIDANCE
-        # -------------------------------
-
-        self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND)
-        self.ssthresh = max(self.ssthresh, MIN_CWND)
+            # This is your existing reduction logic
+            self.enter_cubic_congestion_avoidance()
+            self.cwnd_bytes = self.ssthresh
+            self.state = STATE_CONGESTION_AVOIDANCE
+            self.cwnd_bytes = max(self.cwnd_bytes, MIN_CWND)
+            self.ssthresh = max(self.ssthresh, MIN_CWND)
+            self.log_cwnd()
 
         self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
         self.dup_ack_count = 0
-        self.log_cwnd()
 
 
     # --- send logic ---
@@ -309,6 +305,16 @@ class Server:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
 
+            if sack_start > self.base_seq_num and self.dup_ack_count < 3:
+                # This SACK is new information telling us self.base_seq_num is lost.
+                # Don't wait for 3 dup-ACKs. Trigger recovery NOW.
+                print("SACK-based recovery. Performing CUBIC reduction.")
+                
+                # Set dup_ack_count to 3 to enter the existing logic
+                # This is a simple way to trigger it.
+                self.dup_ack_count = 3
+            # --- END NEW LOGIC ---
+
         # Duplicate ACK
         if cum_ack == self.base_seq_num:
             self.dup_ack_count += 1
@@ -335,6 +341,7 @@ class Server:
 
         # New ACK (cumulative ack advanced)
         if cum_ack > self.base_seq_num:
+            self.in_rto_recovery = False
             self.dup_ack_count = 0
             newly_acked = []
             for seq in list(self.sent_packets.keys()):
