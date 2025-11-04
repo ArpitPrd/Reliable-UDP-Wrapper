@@ -9,6 +9,7 @@ import csv
 import select
 import collections
 from collections import deque
+import random
 
 # --- Constants ---
 HEADER_FORMAT = "!IIHII2x"
@@ -30,12 +31,12 @@ STATE_CONGESTION_AVOIDANCE = 2
 # RTO constants
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
-K = 5.0        # Standard: 4
-INITIAL_RTO = 0.15 # 150ms is fine for this low-latency network
+K = 4.0        # Standard: 4
+INITIAL_RTO = 0.25 # 150ms is fine for this low-latency network
 MIN_RTO = 0.05
 
 # Minimum cwnd in bytes (stay able to probe)
-MIN_CWND = 4 * MSS_BYTES
+MIN_CWND = 8 * MSS_BYTES
 
 class Server:
     def __init__(self, ip, port):
@@ -46,6 +47,7 @@ class Server:
         self.socket.setblocking(False)
         self.client_addr = None
         self.in_rto_recovery = False
+        self.startup_delay = random.uniform(0, 0.005)
         print(f"Server started on {self.ip}:{self.port}")
 
         # load file
@@ -90,7 +92,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.4
-        self.beta_cubic = 0.7
+        self.beta_cubic = 0.85
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -194,7 +196,9 @@ class Server:
         w_mss = max(1.0, self.w_max_bytes / PAYLOAD_SIZE)
         num = w_mss * (1.0 - self.beta_cubic) / max(self.C, 1e-9)
         self.K = (num ** (1.0/3.0)) if num > 0 else 0.0
-
+        
+        self.cwnd_bytes = int(self.cwnd_bytes * 0.9 + self.ssthresh * 0.1)
+        
     # --- timeouts ---
     def handle_timeouts(self):
         now = time.time()
@@ -224,7 +228,7 @@ class Server:
             self.ssthresh = max(self.ssthresh, MIN_CWND)
             self.log_cwnd()
 
-        self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
+        self.rto = min(self.rto * 1.25, 1.5) # Back off RTO timer
         self.dup_ack_count = 0
 
 
@@ -246,8 +250,8 @@ class Server:
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
         # small deterministic startup jitter (only while there is no inflight)
-        # if inflight == 0 and self.startup_delay > 0:
-        #     time.sleep(self.startup_delay)
+        if inflight == 0 and self.startup_delay > 0:
+            time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
         # self._apply_rate_targeting()
@@ -262,6 +266,7 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
+                time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
@@ -447,7 +452,7 @@ class Server:
         # log changes
         if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
             self.log_cwnd()
-
+        self.cwnd_bytes = int(0.8 * old_cwnd + 0.2 * self.cwnd_bytes)
         return "CONTINUE"
 
     # --- logging ---
