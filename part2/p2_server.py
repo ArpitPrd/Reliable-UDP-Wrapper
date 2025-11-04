@@ -231,17 +231,24 @@ class Server:
         if not self.resend_packet(oldest):
             return
         print(f"[TIMEOUT] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, srtt={self.srtt:.4f}, rto={self.rto:.3f}, inflight={len(self.sent_packets)}")
-        print("Timeout (RTO). Entering Slow Start.")
-        # congestion event
+        print("Timeout (RTO). Reducing window (NOT resetting to 1).")
+        
+        # This is the CUBIC response (beta_cubic = 0.7)
+        # This sets self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
+        # It also resets the CUBIC clock.
         self.enter_cubic_congestion_avoidance()
-        # conservative slow-start after RTO
-        self.ssthresh = max(int(self.cwnd_bytes * (1 - 0.25 * (self.rttvar / max(self.srtt, 0.001)))), 2 * MSS_BYTES)
-        self.cwnd_bytes = MSS_BYTES
-        self.state = STATE_SLOW_START
-        self.rto = min(self.rto * 1.5, 2.0)
+
+        # --- THIS IS THE KEY CHANGE ---
+        # DO NOT reset cwnd to 1 MSS. This is catastrophic for performance.
+        # Instead, set cwnd to the new ssthresh (which is 0.7 * old_cwnd) 
+        # and enter Congestion Avoidance directly.
+        self.cwnd_bytes = self.ssthresh
+        self.state = STATE_CONGESTION_AVOIDANCE
+        # -------------------------------
+
+        self.rto = min(self.rto * 1.5, 2.0) # Back off RTO timer
         self.dup_ack_count = 0
         self.log_cwnd()
-        self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
 
     # --- bandwidth estimator & cwnd targeter ---
     def _record_acked_bytes(self, bytes_acked):
