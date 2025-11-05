@@ -32,8 +32,8 @@ STATE_CONGESTION_AVOIDANCE = 2
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 4.0        # Standard: 4
-INITIAL_RTO = 0.25 # 150ms is fine for this low-latency network
-MIN_RTO = 0.05
+INITIAL_RTO = 0.3 # 150ms is fine for this low-latency network
+MIN_RTO = 0.1
 
 # Minimum cwnd in bytes (stay able to probe)
 MIN_CWND = 4 * MSS_BYTES
@@ -68,9 +68,9 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = (6) * MSS_BYTES
+        self.cwnd_bytes = 10 * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  128 * MSS_BYTES
+        self.ssthresh =  256 * MSS_BYTES
 
         # RTO
         self.rto = INITIAL_RTO
@@ -132,14 +132,13 @@ class Server:
             self.rttvar = (1 - BETA) * self.rttvar + BETA * abs(self.srtt - rtt_sample)
             self.srtt = (1 - ALPHA) * self.srtt + ALPHA * rtt_sample
 
-        # Smoothed RTO to avoid violent swings
         new_rto = self.srtt + K * self.rttvar
-        # initialize rto on first sample:
         if self.rto == 0:
             self.rto = max(MIN_RTO, new_rto)
         else:
-            self.rto = 0.85 * self.rto + 0.15 * max(MIN_RTO, new_rto)
-        self.rto = max(MIN_RTO, self.rto)
+            # More smoothing to prevent violent swings
+            self.rto = 0.90 * self.rto + 0.10 * max(MIN_RTO, new_rto)
+        self.rto = max(MIN_RTO, min(self.rto, 3.0))
 
     # --- resend helpers ---
     def resend_packet(self, seq_num):
@@ -209,31 +208,25 @@ class Server:
                 break
         if not timed:
             return
+        
         oldest = timed[0]
         if not self.resend_packet(oldest):
             return
-        # --- THIS IS THE FIX ---
-        # Only reduce t`he window ONCE per RTO event.
-        # Do not enter the spiral.
+        
+        # Only reduce window ONCE per RTO event
         if not self.in_rto_recovery:
-            print("[TIMEOUT] RTO. Resetting to Slow Start.")
-            self.in_rto_recovery = True # Set the flag!
-
-            # This is the standard TCP response to an RTO:
+            print("[TIMEOUT] RTO. Reducing cwnd.")
+            self.in_rto_recovery = True
             
-            # 1. Record the current window and set the new ssthresh.
-            #    This function already does this (ssthresh = cwnd * 0.85)
-            self.enter_cubic_congestion_avoidance() 
-            
-            # 2. Reset the cwnd to a safe, small value.
-            self.cwnd_bytes = MIN_CWND
-            
-            # 3. Re-enter Slow Start to probe for the new capacity.
-            self.state = STATE_SLOW_START
-            
+            # Less aggressive reduction
+            self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
+            self.cwnd_bytes = self.ssthresh  # Don't drop to MIN_CWND
+            self.state = STATE_CONGESTION_AVOIDANCE
+            self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
-
-        self.rto = min(self.rto * 1.25, 1.5) # Back off RTO timer
+        
+        # Gentler RTO backoff
+        self.rto = min(self.rto * 1.5, 2.0)  # Changed from 1.25
         self.dup_ack_count = 0
 
 
@@ -255,8 +248,8 @@ class Server:
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
         # small deterministic startup jitter (only while there is no inflight)
-        if inflight == 0 and self.startup_delay > 0:
-            time.sleep(self.startup_delay)
+        # if inflight == 0 and self.startup_delay > 0:
+        #     time.sleep(self.startup_delay)
 
         # apply rate targeting on each send cycle if we have an estimator
         # self._apply_rate_targeting()
@@ -315,14 +308,10 @@ class Server:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
 
-            if sack_start > self.base_seq_num and self.dup_ack_count < 3:
-                # This SACK is new information telling us self.base_seq_num is lost.
-                # Don't wait for 3 dup-ACKs. Trigger recovery NOW.
-                print("SACK-based recovery. Performing CUBIC reduction.")
-                
-                # Set dup_ack_count to 3 to enter the existing logic
-                # This is a simple way to trigger it.
-                self.dup_ack_count = 3
+            if sack_start > 0 and sack_end > sack_start:
+                if sack_start in self.sent_packets:
+                    self.sacked_packets.add(sack_start)
+
             # --- END NEW LOGIC ---
 
         # Duplicate ACK
@@ -330,17 +319,22 @@ class Server:
             self.dup_ack_count += 1
             
             if self.dup_ack_count == 3:
-                print("3 Dup-ACKs. Performing CUBIC reduction (Fast Retransmit).")
+                print("3 Dup-ACKs. Fast Retransmit.")
                 
-                # This function sets ssthresh = cwnd * beta_cubic (0.7) 
-                # and resets the CUBIC growth curve.
-                self.enter_cubic_congestion_avoidance() 
+                # Save current state
+                old_cwnd = self.cwnd_bytes
                 
-                # Set the new cwnd to the new ssthresh (multiplicative decrease).
+                # CUBIC reduction
+                self.enter_cubic_congestion_avoidance()
                 self.cwnd_bytes = self.ssthresh
                 
-                # We STAY in STATE_CONGESTION_AVOIDANCE.
-                self.resend_missing_packet()
+                # Only resend ONE packet (not two)
+                for seq_num in list(self.sent_packets.keys()):
+                    if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
+                        self.resend_packet(seq_num)
+                        break  # Only resend first missing
+                
+                self.log_cwnd()
             
             # If dup_ack_count > 3, CUBIC does nothing. It waits for the
             # new ACK to signal recovery from this loss event.
