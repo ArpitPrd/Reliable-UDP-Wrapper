@@ -68,9 +68,9 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = 10 * MSS_BYTES
+        self.cwnd_bytes = 8 * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  256 * MSS_BYTES
+        self.ssthresh =  200 * MSS_BYTES
 
         # RTO
         self.rto = INITIAL_RTO
@@ -91,15 +91,15 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 1.2
-        self.beta_cubic = 0.85
+        self.C = 0.4
+        self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
         self.K = 0.0
 
         # initial deterministic phase offset used in enter_cubic
-        self.phase_offset = (self.port % 5) * 0.025
+        self.phase_offset = 0#(self.port % 5) * 0.025
 
         # logging
         self.cwnd_log_file = None
@@ -218,15 +218,15 @@ class Server:
             print("[TIMEOUT] RTO. Reducing cwnd.")
             self.in_rto_recovery = True
             
-            # Less aggressive reduction
-            self.ssthresh = max(int(self.cwnd_bytes * 0.7), 2 * MSS_BYTES)
-            self.cwnd_bytes = self.ssthresh  # Don't drop to MIN_CWND
+            # Use beta_cubic for consistency
+            self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
+            self.cwnd_bytes = self.ssthresh
             self.state = STATE_CONGESTION_AVOIDANCE
             self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
         
-        # Gentler RTO backoff
-        self.rto = min(self.rto * 1.5, 2.0)  # Changed from 1.25
+        # Less aggressive RTO backoff
+        self.rto = min(self.rto * 1.5, 3.0)  # Cap at 3s
         self.dup_ack_count = 0
 
 
@@ -264,9 +264,9 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                time.sleep(0.0005)
+                # time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
-                print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
+                # print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
                 if e.errno in [11, 35, 10035]:
                     if flags & EOF_FLAG:
@@ -308,9 +308,9 @@ class Server:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
 
-            if sack_start > 0 and sack_end > sack_start:
-                if sack_start in self.sent_packets:
-                    self.sacked_packets.add(sack_start)
+            # if sack_start > 0 and sack_end > sack_start:
+            #     if sack_start in self.sent_packets:
+            #         self.sacked_packets.add(sack_start)
 
             # --- END NEW LOGIC ---
 
@@ -321,18 +321,16 @@ class Server:
             if self.dup_ack_count == 3:
                 print("3 Dup-ACKs. Fast Retransmit.")
                 
-                # Save current state
-                old_cwnd = self.cwnd_bytes
-                
-                # CUBIC reduction
+                # Enter congestion avoidance and reduce window
                 self.enter_cubic_congestion_avoidance()
                 self.cwnd_bytes = self.ssthresh
+                self.state = STATE_CONGESTION_AVOIDANCE  # Ensure we're in CA
                 
-                # Only resend ONE packet (not two)
+                # Only resend ONE packet
                 for seq_num in list(self.sent_packets.keys()):
                     if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
                         self.resend_packet(seq_num)
-                        break  # Only resend first missing
+                        break
                 
                 self.log_cwnd()
             
@@ -377,7 +375,7 @@ class Server:
 
             # update base
             self.base_seq_num = cum_ack
-            print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
+            # print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
 
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
