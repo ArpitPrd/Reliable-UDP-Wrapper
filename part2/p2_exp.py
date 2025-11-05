@@ -475,7 +475,7 @@ def run_trial_with_udp(output_handle, bw=100, loss=0, delay_c2_ms=5, udp_off_mea
 
 def experiment_background_udp(exp_out, num_iterations=1):
 
-    udp_off_means = [1.5, 0.8, 0.5]
+    udp_off_means = [0.5]#[1.5, 0.8, 0.5]
     
     for udp_off_mean in udp_off_means:
         print(f"[background_udp] Testing with UDP OFF mean={udp_off_mean}s")
