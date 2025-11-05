@@ -39,7 +39,7 @@ MIN_RTO = 0.1
 MIN_CWND = 4 * MSS_BYTES
 
 # --- HyStart++ Constants ---
-HYSTART_LSS_RTT_THRESH_MS = 8.0  # 8ms delay threshold
+HYSTART_LSS_RTT_THRESH_MS = 16.0  # 8ms delay threshold
 HYSTART_MIN_SAMPLES = 8          # Min RTT samples to start checking
 
 class Server:
@@ -460,10 +460,14 @@ class Server:
                     if self.cwnd_bytes > 0:
                         inc = 1.5 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)  # Changed from 1.2
                         self.ack_credits += inc
-                        if self.ack_credits >= 1.0:
-                            i = int(self.ack_credits)
-                            self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                            self.ack_credits -= i
+                        
+                        # --- BUG FIX ---
+                        # Check if credits exceed a *full payload*
+                        if self.ack_credits >= PAYLOAD_SIZE:
+                            i = int(self.ack_credits / PAYLOAD_SIZE) # Number of *packets* to add
+                            self.cwnd_bytes = min(self.cwnd_bytes + (i * PAYLOAD_SIZE), MAX_CWND)
+                            self.ack_credits -= (i * PAYLOAD_SIZE)
+                        # --- END FIX ---
                 else:
                     # CUBIC-like growth
                     rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
@@ -489,10 +493,13 @@ class Server:
                     
                     self.ack_credits += inc_per_ack
                     
-                    if self.ack_credits >= 1.0:
-                        i = int(self.ack_credits)
-                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                        self.ack_credits -= i
+                    # --- BUG FIX ---
+                    # Check if credits exceed a *full payload*
+                    if self.ack_credits >= PAYLOAD_SIZE:
+                        i = int(self.ack_credits / PAYLOAD_SIZE) # Number of *packets* to add
+                        self.cwnd_bytes = min(self.cwnd_bytes + (i * PAYLOAD_SIZE), MAX_CWND)
+                        self.ack_credits -= (i * PAYLOAD_SIZE)
+                    # --- END FIX ---
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
             # self._apply_rate_targeting()
