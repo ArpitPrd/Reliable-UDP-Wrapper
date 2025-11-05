@@ -68,9 +68,9 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = 16 * MSS_BYTES
+        self.cwnd_bytes = 32 * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  400 * MSS_BYTES
+        self.ssthresh =  600 * MSS_BYTES
 
         # RTO
         self.rto = INITIAL_RTO
@@ -91,15 +91,15 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 2.0
-        self.beta_cubic = 0.85
+        self.C = 0.4
+        self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
         self.K = 0.0
 
         # initial deterministic phase offset used in enter_cubic
-        self.phase_offset = (self.port % 5) * 0.025
+        # self.phase_offset = (self.port % 5) * 0.025
 
         # logging
         self.cwnd_log_file = None
@@ -139,9 +139,9 @@ class Server:
             self.rto = max(MIN_RTO, new_rto)
         else:
             # Less smoothing - react faster to changes
-            self.rto = 0.70 * self.rto + 0.30 * max(MIN_RTO, new_rto)  # Changed from 0.90/0.10
+            self.rto = 0.875 * self.rto + 0.125 * max(MIN_RTO, new_rto)
         
-        self.rto = max(MIN_RTO, min(self.rto, 2.0))  # Reduce max RTO from 3.0 to 2.0
+        self.rto = max(MIN_RTO, min(self.rto, 3.0))  # Reduce max RTO from 3.0 to 2.0
 
     # --- resend helpers ---
     def resend_packet(self, seq_num):
@@ -186,7 +186,7 @@ class Server:
     # --- CUBIC bookkeeping ---
     def enter_cubic_congestion_avoidance(self):
         # deterministic phase shift
-        self.t_last_congestion = time.time() - self.phase_offset
+        self.t_last_congestion = time.time()# - self.phase_offset
         new_w_max = self.cwnd_bytes
         if new_w_max < self.w_max_bytes:
             self.w_max_last_bytes = self.w_max_bytes
@@ -222,14 +222,15 @@ class Server:
             self.in_rto_recovery = True
             
             # Less aggressive reduction - maintain more throughput against UDP
-            self.ssthresh = max(int(self.cwnd_bytes * 0.75), 2 * MSS_BYTES)  # Changed from beta_cubic (0.9)
+            self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
             self.cwnd_bytes = self.ssthresh
+            self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
             self.state = STATE_CONGESTION_AVOIDANCE
             self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
             
             # Faster RTO recovery
-            self.rto = min(self.rto * 1.25, 2.0)  # Changed from 1.5 and cap at 2s instead of 3s
+            self.rto = min(self.rto * 1.5, 3.0)  # Changed from 1.5 and cap at 2s instead of 3s
             self.dup_ack_count = 0
 
 
@@ -257,9 +258,19 @@ class Server:
         # apply rate targeting on each send cycle if we have an estimator
         # self._apply_rate_targeting()
 
+        pacing_delay = 0.0
+        if self.srtt > 0 and self.cwnd_bytes > 0:
+            packets_in_cwnd = self.cwnd_bytes / PAYLOAD_SIZE
+            pacing_delay = self.srtt / (2.0 * packets_in_cwnd)  # Send at 2x rate
+            pacing_delay = max(0.0001, min(pacing_delay, 0.001))  # Clamp to reasonable
+
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
                 break
+            
+            if pacing_delay > 0 and inflight > 0:
+                time.sleep(pacing_delay)
+
             data, seq_num, flags = self.get_next_content()
             if data is None:
                 break
@@ -325,8 +336,9 @@ class Server:
                 print("3 Dup-ACKs. Fast Retransmit.")
                 
                 # Less aggressive window reduction
-                self.ssthresh = max(int(self.cwnd_bytes * 0.80), 2 * MSS_BYTES)  # Changed from beta_cubic
+                self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)  # Changed from beta_cubic
                 self.cwnd_bytes = self.ssthresh
+                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
                 self.enter_cubic_congestion_avoidance()
                 
@@ -384,6 +396,7 @@ class Server:
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
                 self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
+                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
@@ -392,11 +405,13 @@ class Server:
                 if self.t_last_congestion == 0:
                     # Reno-like additive increase
                     if self.cwnd_bytes > 0:
-                        inc = 1.5 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)  # Changed from 1.2
+                        inc = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
                         self.ack_credits += inc
                         if self.ack_credits >= 1.0:
                             i = int(self.ack_credits)
                             self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                            self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+
                             self.ack_credits -= i
                 else:
                     # CUBIC-like growth
@@ -404,20 +419,22 @@ class Server:
                     t_elapsed = time.time() - self.t_last_congestion
                     
                     # More aggressive alpha for faster convergence
-                    alpha_cubic = (4.0 * self.beta_cubic / (2.0 - self.beta_cubic))  # Changed from 3.0
+                    # Standard CUBIC calculations
+                    alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
-                    
+
                     # CUBIC growth curve
                     t_now_minus_K = t_elapsed - self.K
                     w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
-                    
+
+                    # Use max of TCP-friendly and CUBIC window
                     target_cwnd = max(w_cubic_now, w_tcp)
                     target_cwnd = min(target_cwnd, MAX_CWND)
                     
                     inc_per_ack = 0.0
                     if self.cwnd_bytes < target_cwnd:
                         # More aggressive growth rate
-                        inc_per_ack = 1.5 * (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes  # Added 1.5x multiplier
+                        inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                     else:
                         inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
                     
@@ -426,6 +443,8 @@ class Server:
                     if self.ack_credits >= 1.0:
                         i = int(self.ack_credits)
                         self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                        self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+
                         self.ack_credits -= i
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
