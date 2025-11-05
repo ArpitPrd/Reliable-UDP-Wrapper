@@ -16,7 +16,7 @@ HEADER_FORMAT = "!IIHII2x"
 HEADER_SIZE = 20
 MSS_BYTES = 1200
 PAYLOAD_SIZE = MSS_BYTES - HEADER_SIZE
-MAX_CWND = 8 * 1024 * 1024
+MAX_CWND = 16 * 1024 * 1024  # Increased for high BW scenarios
 
 # Flags
 SYN_FLAG = 0x1
@@ -26,17 +26,16 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-# STATE_FAST_RECOVERY = 3
 
 # RTO constants
 ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 4.0        # Standard: 4
-INITIAL_RTO = 0.3 # 150ms is fine for this low-latency network
-MIN_RTO = 0.1
+INITIAL_RTO = 0.2
+MIN_RTO = 0.08  # Lowered for responsiveness
 
-# Minimum cwnd in bytes (stay able to probe)
-MIN_CWND = 4 * MSS_BYTES
+# Minimum cwnd in bytes
+MIN_CWND = 2 * MSS_BYTES
 
 class Server:
     def __init__(self, ip, port):
@@ -47,7 +46,6 @@ class Server:
         self.socket.setblocking(False)
         self.client_addr = None
         self.in_rto_recovery = False
-        self.startup_delay = random.uniform(0, 0.005)
         print(f"Server started on {self.ip}:{self.port}")
 
         # load file
@@ -65,12 +63,10 @@ class Server:
         self.eof_sent_seq = -1
         self.connection_dead = False
 
-        # Congestion control
+        # Congestion control - adaptive initial values
         self.state = STATE_SLOW_START
-        # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = 8 * MSS_BYTES
-        # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  200 * MSS_BYTES
+        self.cwnd_bytes = 10 * MSS_BYTES  # IW10
+        self.ssthresh = 512 * MSS_BYTES   # High initial ssthresh
 
         # RTO
         self.rto = INITIAL_RTO
@@ -78,7 +74,7 @@ class Server:
         self.rttvar = 0.0
         self.rtt_min = float('inf')
 
-        # Sent buffer (seq -> (packet, send_time, retrans_count))
+        # Sent buffer
         self.sent_packets = collections.OrderedDict()
 
         # SACK & dup-acks
@@ -90,16 +86,26 @@ class Server:
         self.last_ack_time = 0.0
         self.ack_credits = 0.0
 
-        # CUBIC params (still used as loss fallback)
+        # CUBIC params
         self.C = 0.4
         self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
         self.K = 0.0
+        
+        # Hystart++ parameters for faster convergence
+        self.hystart_enabled = True
+        self.hystart_ack_train_length = 5
+        self.hystart_ack_delta_threshold = 2.0  # ms
+        self.hystart_last_round_min_rtt = float('inf')
+        self.hystart_curr_round_min_rtt = float('inf')
+        self.hystart_round_start = 0
+        self.hystart_end_seq = 0
 
-        # initial deterministic phase offset used in enter_cubic
-        self.phase_offset = 0#(self.port % 5) * 0.025
+        # Loss detection improvement
+        self.consecutive_losses = 0
+        self.loss_backoff_factor = 1.0
 
         # logging
         self.cwnd_log_file = None
@@ -110,7 +116,6 @@ class Server:
         if self.state == STATE_SLOW_START: return "SS"
         if self.state == STATE_CONGESTION_AVOIDANCE:
             return "CUBIC" if self.t_last_congestion > 0 else "CA"
-        # if self.state == STATE_FAST_RECOVERY: return "FR"
         return "UNK"
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
@@ -125,6 +130,11 @@ class Server:
     # --- RTO / RTT updates ---
     def update_rto(self, rtt_sample):
         self.rtt_min = min(self.rtt_min, rtt_sample)
+        
+        # HyStart++ logic
+        if self.state == STATE_SLOW_START and self.hystart_enabled:
+            self.hystart_curr_round_min_rtt = min(self.hystart_curr_round_min_rtt, rtt_sample)
+            
         if self.srtt == 0.0:
             self.srtt = rtt_sample
             self.rttvar = rtt_sample / 2.0
@@ -136,20 +146,18 @@ class Server:
         if self.rto == 0:
             self.rto = max(MIN_RTO, new_rto)
         else:
-            # More smoothing to prevent violent swings
-            self.rto = 0.90 * self.rto + 0.10 * max(MIN_RTO, new_rto)
-        self.rto = max(MIN_RTO, min(self.rto, 3.0))
+            self.rto = 0.875 * self.rto + 0.125 * max(MIN_RTO, new_rto)
+        self.rto = max(MIN_RTO, min(self.rto, 2.0))
 
     # --- resend helpers ---
     def resend_packet(self, seq_num):
         if seq_num not in self.sent_packets:
             return False
         packet_data, send_time, retrans_count = self.sent_packets[seq_num]
-        if retrans_count > 15:
+        if retrans_count > 20:
             print("Packet resend limit reached. Aborting.")
             self.connection_dead = True
             return False
-        # update send time and count
         del self.sent_packets[seq_num]
         self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
         try:
@@ -157,7 +165,6 @@ class Server:
             return True
         except OSError as e:
             if e.errno in [11, 35, 10035]:
-                # put it back front
                 del self.sent_packets[seq_num]
                 self.sent_packets[seq_num] = (packet_data, send_time, retrans_count)
                 self.sent_packets.move_to_end(seq_num, last=False)
@@ -172,30 +179,22 @@ class Server:
             self.connection_dead = True
             return False
 
-    def resend_missing_packet(self):
-        count = 0
-        for seq_num in list(self.sent_packets.keys()):
-            if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
-                self.resend_packet(seq_num)
-                count += 1
-                if count >= 2: break
-
     # --- CUBIC bookkeeping ---
     def enter_cubic_congestion_avoidance(self):
-        # deterministic phase shift
-        self.t_last_congestion = time.time() - self.phase_offset
+        self.t_last_congestion = time.time()
         new_w_max = self.cwnd_bytes
+        
         if new_w_max < self.w_max_bytes:
             self.w_max_last_bytes = self.w_max_bytes
             self.w_max_bytes = new_w_max * (1.0 + self.beta_cubic) / 2.0
         else:
             self.w_max_last_bytes = self.w_max_bytes
             self.w_max_bytes = new_w_max
-        self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
+            
+        self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), MIN_CWND)
         w_mss = max(1.0, self.w_max_bytes / PAYLOAD_SIZE)
         num = w_mss * (1.0 - self.beta_cubic) / max(self.C, 1e-9)
         self.K = (num ** (1.0/3.0)) if num > 0 else 0.0
-        
 
     # --- timeouts ---
     def handle_timeouts(self):
@@ -215,20 +214,24 @@ class Server:
         
         # Only reduce window ONCE per RTO event
         if not self.in_rto_recovery:
-            print("[TIMEOUT] RTO. Reducing cwnd.")
             self.in_rto_recovery = True
+            self.consecutive_losses += 1
             
-            # Use beta_cubic for consistency
-            self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
+            # Adaptive response based on loss history
+            if self.consecutive_losses > 3:
+                # Severe congestion - be more conservative
+                reduction_factor = 0.5
+            else:
+                reduction_factor = self.beta_cubic
+            
+            self.ssthresh = max(int(self.cwnd_bytes * reduction_factor), MIN_CWND)
             self.cwnd_bytes = self.ssthresh
             self.state = STATE_CONGESTION_AVOIDANCE
             self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
         
-        # Less aggressive RTO backoff
-        self.rto = min(self.rto * 1.5, 3.0)  # Cap at 3s
+        self.rto = min(self.rto * 1.5, 3.0)
         self.dup_ack_count = 0
-
 
     # --- send logic ---
     def get_next_content(self):
@@ -247,13 +250,8 @@ class Server:
 
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
-        # small deterministic startup jitter (only while there is no inflight)
-        # if inflight == 0 and self.startup_delay > 0:
-        #     time.sleep(self.startup_delay)
-
-        # apply rate targeting on each send cycle if we have an estimator
-        # self._apply_rate_targeting()
-
+        sent_count = 0
+        
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
                 break
@@ -264,9 +262,13 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                # time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
-                # print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
+                sent_count += 1
+                
+                # Pacing for very high bandwidth scenarios
+                if self.cwnd_bytes > 500 * MSS_BYTES and sent_count % 10 == 0:
+                    time.sleep(0.00001)  # Minimal pacing only for very large windows
+                    
             except OSError as e:
                 if e.errno in [11, 35, 10035]:
                     if flags & EOF_FLAG:
@@ -275,13 +277,11 @@ class Server:
                         self.next_seq_num = seq_num
                     break
                 if e.errno in [101, 111, 113]:
-                    print(f"Client unreachable on send: {e}. Aborting transfer.")
                     self.connection_dead = True
                     break
                 else:
                     raise
             except Exception as e:
-                print(f"Error in send_new_data: {e}")
                 self.connection_dead = True
                 break
             if flags & EOF_FLAG:
@@ -303,39 +303,37 @@ class Server:
 
         self.last_ack_time = time.time()
 
-        # SACK processing (single SACK support)
+        # SACK processing
         if sack_start > 0 and sack_end > sack_start:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
-
-            # if sack_start > 0 and sack_end > sack_start:
-            #     if sack_start in self.sent_packets:
-            #         self.sacked_packets.add(sack_start)
-
-            # --- END NEW LOGIC ---
 
         # Duplicate ACK
         if cum_ack == self.base_seq_num:
             self.dup_ack_count += 1
             
             if self.dup_ack_count == 3:
-                print("3 Dup-ACKs. Fast Retransmit.")
+                # Fast Retransmit
+                self.consecutive_losses += 1
                 
-                # Enter congestion avoidance and reduce window
+                # Adaptive response
+                if self.consecutive_losses > 3:
+                    reduction_factor = 0.6  # More conservative
+                else:
+                    reduction_factor = self.beta_cubic
+                
                 self.enter_cubic_congestion_avoidance()
-                self.cwnd_bytes = self.ssthresh
-                self.state = STATE_CONGESTION_AVOIDANCE  # Ensure we're in CA
+                self.cwnd_bytes = max(int(self.cwnd_bytes * reduction_factor), MIN_CWND)
+                self.ssthresh = self.cwnd_bytes
+                self.state = STATE_CONGESTION_AVOIDANCE
                 
-                # Only resend ONE packet
-                for seq_num in list(self.sent_packets.keys()):
-                    if seq_num >= self.base_seq_num and seq_num not in self.sacked_packets:
-                        self.resend_packet(seq_num)
+                # Resend one packet
+                for seq in list(self.sent_packets.keys()):
+                    if seq >= self.base_seq_num and seq not in self.sacked_packets:
+                        self.resend_packet(seq)
                         break
                 
                 self.log_cwnd()
-            
-            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
-            # new ACK to signal recovery from this loss event.
 
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
@@ -345,6 +343,8 @@ class Server:
         if cum_ack > self.base_seq_num:
             self.in_rto_recovery = False
             self.dup_ack_count = 0
+            self.consecutive_losses = max(0, self.consecutive_losses - 1)  # Decay loss counter
+            
             newly_acked = []
             for seq in list(self.sent_packets.keys()):
                 if seq < cum_ack:
@@ -358,6 +358,7 @@ class Server:
                     if retrans_count == 0:
                         ack_rtt_sample = time.time() - send_time
                         self.update_rto(ack_rtt_sample)
+                        
                 # accumulate acked bytes
                 for s in newly_acked:
                     if s in self.sent_packets:
@@ -372,76 +373,81 @@ class Server:
                     del self.sent_packets[s]
                 self.sacked_packets.discard(s)
 
-
-            # update base
             self.base_seq_num = cum_ack
-            # print(f"[ACK] base={self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, ssthresh={int(self.ssthresh)}, state={self.get_state_str()}, srtt={self.srtt:.4f}, rto={self.rto:.3f}")
 
-            # Update cwnd: slow start or congestion avoidance
+            # Update cwnd
             if self.state == STATE_SLOW_START:
+                # HyStart++ early exit check
+                if self.hystart_enabled and cum_ack > self.hystart_end_seq:
+                    # Check if we should exit slow start early
+                    if self.hystart_curr_round_min_rtt != float('inf') and self.hystart_last_round_min_rtt != float('inf'):
+                        rtt_increase = self.hystart_curr_round_min_rtt - self.hystart_last_round_min_rtt
+                        if rtt_increase > self.hystart_ack_delta_threshold / 1000.0:  # Convert ms to s
+                            # Exit slow start early
+                            self.ssthresh = self.cwnd_bytes
+                            self.state = STATE_CONGESTION_AVOIDANCE
+                            self.enter_cubic_congestion_avoidance()
+                    
+                    # Start new round
+                    self.hystart_last_round_min_rtt = self.hystart_curr_round_min_rtt
+                    self.hystart_curr_round_min_rtt = float('inf')
+                    self.hystart_end_seq = self.next_seq_num
+                
+                # Standard slow start growth
                 self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
-                # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
+                
+                # Traditional ssthresh check
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
+                    
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 if self.t_last_congestion == 0:
                     # Reno-like additive increase
                     if self.cwnd_bytes > 0:
-                        inc = 1.2 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
-                        self.ack_credits += inc
+                        inc = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                        self.ack_credits += inc * acked_bytes / PAYLOAD_SIZE
                     if self.ack_credits >= 1.0:
-                        i = int(self.ack_credits)
-                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                        self.ack_credits -= i
+                        increase = int(self.ack_credits)
+                        self.cwnd_bytes = min(self.cwnd_bytes + increase, MAX_CWND)
+                        self.ack_credits -= increase
                 else:
-                    # CUBIC-like growth
-                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
+                    # CUBIC growth
+                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, 0.05)
                     t_elapsed = time.time() - self.t_last_congestion
                     
-                    # Reno-friendly growth curve (W_tcp)
+                    # TCP-friendly calculation
                     alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
 
-                    # CUBIC growth curve (W_cubic)
-                    # We use t_elapsed to get the target for *now*
-                    t_now_minus_K = t_elapsed - self.K
-                    w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
+                    # CUBIC calculation
+                    t_diff = t_elapsed - self.K
+                    w_cubic = self.C * (t_diff ** 3) + self.w_max_bytes
 
-                    # The target cwnd is the larger of the two
-                    target_cwnd = max(w_cubic_now, w_tcp)
-                    target_cwnd = min(target_cwnd, MAX_CWND) # Don't exceed max
-
-                    # --- THIS IS THE FIX ---
-                    # Now, grow towards the target_cwnd using the ack_credits system.
+                    target_cwnd = max(w_cubic, w_tcp)
+                    target_cwnd = min(target_cwnd, MAX_CWND)
                     
-                    inc_per_ack = 0.0 # <-- Renamed variable for clarity
+                    # Calculate increment
                     if self.cwnd_bytes < target_cwnd:
-                        # We are below the target, grow fast.
-                        # This formula *is* the per-ACK increment.
-                        inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                        # Convex region - fast growth
+                        cnt = self.cwnd_bytes / (target_cwnd - self.cwnd_bytes + 1)
+                        if cnt > 0:
+                            inc_per_ack = PAYLOAD_SIZE / cnt
+                        else:
+                            inc_per_ack = PAYLOAD_SIZE
                     else:
-                        # We are at or above the target (e.g., in the "concave" region)
-                        # Just do standard additive increase.
+                        # Concave region - slow growth
                         inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
-
-                    # --- FIX ---
-                    # The variable 'inc_per_ack' is already the per-ACK increment.
-                    # Do not scale it again.
-                    self.ack_credits += inc_per_ack
-
-                    # Apply the credits
+                    
+                    self.ack_credits += inc_per_ack * acked_bytes / PAYLOAD_SIZE
+                    
                     if self.ack_credits >= 1.0:
-                        i = int(self.ack_credits)
-                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                        self.ack_credits -= i
+                        increase = int(self.ack_credits)
+                        self.cwnd_bytes = min(self.cwnd_bytes + increase, MAX_CWND)
+                        self.ack_credits -= increase
 
-            # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            # self._apply_rate_targeting()
-
-            # final check for EOF ack
+            # EOF check
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
-                print("Final EOF ACK received.")
                 if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                     self.log_cwnd()
                 return "DONE"
@@ -468,7 +474,6 @@ class Server:
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
         except Exception:
-            print("[Plotting] matplotlib not available.")
             return
         timestamps, cwnds_kb, ssth_kb, states = [], [], [], []
         try:
@@ -493,7 +498,6 @@ class Server:
         plt.grid(True)
         plt.tight_layout()
         plt.savefig(f"cwnd_plot_{self.port}.png")
-        print(f"[Plotting] CWND plot saved to cwnd_plot_{self.port}.png")
 
     # --- main run loop ---
     def get_next_rto_delay(self):
@@ -504,32 +508,30 @@ class Server:
             _pkt, send_time, _ = self.sent_packets[oldest]
             expiry = send_time + self.rto
             delay = expiry - time.time()
-            return max(0.001, delay)
+            return max(0.0001, delay)
         except StopIteration:
-            return 1.0
+            return 0.001
 
     def run(self):
         try:
-            print("Waiting for client request...")
             readable, _, _ = select.select([self.socket], [], [], 15.0)
             if not readable:
-                print("Timed out waiting for initial client.")
                 self.socket.close()
                 return
             packet, self.client_addr = self.socket.recvfrom(1024)
-            print(f"Client connected from {self.client_addr}")
         except Exception as e:
-            print(f"Error receiving initial request: {e}")
             self.socket.close()
             return
 
         self.start_time = time.time()
         self.last_ack_time = self.start_time
+        
+        # Initialize HyStart
+        self.hystart_end_seq = self.next_seq_num + 10 * PAYLOAD_SIZE
 
         try:
             self.cwnd_log_file = open(self.log_filename, "w", buffering=1)
             self.cwnd_log_file.write("timestamp_s,cwnd_bytes,ssthresh_bytes,state\n")
-            print(f"Logging CWND to {self.log_filename}")
             self.log_cwnd()
         except IOError:
             self.cwnd_log_file = None
@@ -537,7 +539,6 @@ class Server:
         running = True
         while running:
             if self.connection_dead:
-                print("Connection dead, shutting down.")
                 running = False
                 break
             timeout_delay = self.get_next_rto_delay()
@@ -549,11 +550,8 @@ class Server:
                         running = False
             except socket.error as e:
                 if e.errno not in [11, 35, 10035]:
-                    print(f"Socket error in main loop: {e}")
                     running = False
-            except Exception as e:
-                print(f"Error in main loop: {e}")
-                time.sleep(0.001)
+            except Exception:
                 running = False
 
             if not running:
@@ -563,7 +561,6 @@ class Server:
             self.send_new_data()
 
             if time.time() - self.last_ack_time > 30.0:
-                print("Client timed out (30s). Shutting down.")
                 running = False
 
         # finish
@@ -581,7 +578,6 @@ class Server:
 
         if self.cwnd_log_file:
             self.cwnd_log_file.close()
-            print(f"CWND log saved to {self.log_filename}")
             self.plot_cwnd(self.log_filename)
         time.sleep(0.5)
         self.socket.close()
