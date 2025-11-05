@@ -38,6 +38,10 @@ MIN_RTO = 0.1
 # Minimum cwnd in bytes (stay able to probe)
 MIN_CWND = 4 * MSS_BYTES
 
+# --- HyStart++ Constants ---
+HYSTART_LSS_RTT_THRESH_MS = 8.0  # 8ms delay threshold
+HYSTART_MIN_SAMPLES = 8          # Min RTT samples to start checking
+
 class Server:
     def __init__(self, ip, port):
         self.ip = ip
@@ -100,6 +104,14 @@ class Server:
 
         # initial deterministic phase offset used in enter_cubic
         self.phase_offset = (self.port % 5) * 0.025
+
+        # --- Pacing State ---
+        self.next_paced_send_time = 0.0
+
+        # --- HyStart++ State ---
+        self.hystart_found_ss_exit = False
+        self.hystart_round_start_seq = self.base_seq_num
+        self.hystart_sample_count = 0
 
         # logging
         self.cwnd_log_file = None
@@ -250,13 +262,17 @@ class Server:
             return None, -1, 0
 
     def send_new_data(self):
-        inflight = self.next_seq_num - self.base_seq_num
-        # small deterministic startup jitter (only while there is no inflight)
-        # if inflight == 0 and self.startup_delay > 0:
-        #     time.sleep(self.startup_delay)
+        now = time.time()
+        
+        # Check if we should wait for the pacer
+        if now < self.next_paced_send_time:
+            return
 
-        # apply rate targeting on each send cycle if we have an estimator
-        # self._apply_rate_targeting()
+        inflight = self.next_seq_num - self.base_seq_num
+        
+        # Estimate RTT for pacing
+        rtt_est = self.srtt if self.srtt > 0 else self.rto
+        if rtt_est == 0: rtt_est = INITIAL_RTO # Avoid div by zero at start
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -264,19 +280,44 @@ class Server:
             data, seq_num, flags = self.get_next_content()
             if data is None:
                 break
+
+            # --- TCP Pacing Logic ---
+            # Calculate pace rate (Bytes per second)
+            pace_rate_bps = self.cwnd_bytes / rtt_est
+            
+            # Calculate time gap between packets (seconds)
+            if pace_rate_bps > 0:
+                # Use PAYLOAD_SIZE for the gap calculation
+                delay_per_packet = PAYLOAD_SIZE / pace_rate_bps
+            else:
+                delay_per_packet = 0.0 # No delay if rate is 0
+                
+            # Set the next allowed send time based on the *current* time
+            now = time.time() 
+            self.next_paced_send_time = now + delay_per_packet
+            # --- End Pacing Logic ---
+
             header = self.pack_header(seq_num, 0, flags)
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                # time.sleep(0.0005)
-                self.sent_packets[seq_num] = (packet, time.time(), 0)
-                # print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
+                # Log send time using the 'now' from just before pacing
+                self.sent_packets[seq_num] = (packet, now, 0)
+                
+                # After sending, check if we need to pause for the pacer
+                if time.time() < self.next_paced_send_time:
+                    # We've sent our packet for this time slice.
+                    # Stop sending and wait for the main loop.
+                    break
+
             except OSError as e:
                 if e.errno in [11, 35, 10035]:
                     if flags & EOF_FLAG:
                         self.eof_sent_seq = -1
                     else:
                         self.next_seq_num = seq_num
+                    # Set pacer back to 0 so we can retry immediately
+                    self.next_paced_send_time = 0.0
                     break
                 if e.errno in [101, 111, 113]:
                     print(f"Client unreachable on send: {e}. Aborting transfer.")
@@ -364,6 +405,29 @@ class Server:
                     if retrans_count == 0:
                         ack_rtt_sample = time.time() - send_time
                         self.update_rto(ack_rtt_sample)
+                        # --- HyStart++ LSS Logic ---
+                        if self.state == STATE_SLOW_START and not self.hystart_found_ss_exit:
+                            # Check if we've started a new "round" (acked past the start seq)
+                            if cum_ack > self.hystart_round_start_seq:
+                                self.hystart_sample_count += 1
+                                self.hystart_round_start_seq = self.next_seq_num # Mark end of current flight
+                            
+                            if self.hystart_sample_count >= HYSTART_MIN_SAMPLES:
+                                # We have enough samples, start checking for delay
+                                delay_thresh_sec = (HYSTART_LSS_RTT_THRESH_MS / 1000.0)
+                                if self.rtt_min != float('inf'):
+                                    # Use a dynamic threshold: min(8ms, 25% of min_rtt)
+                                    delay_thresh_sec = min(delay_thresh_sec, self.rtt_min / 4.0)
+                                
+                                rtt_limit = self.rtt_min + delay_thresh_sec
+                                
+                                if ack_rtt_sample > rtt_limit and ack_rtt_sample > 0:
+                                    print(f"[HyStart++] LSS detected queueing. RTT={ack_rtt_sample*1000:.1f}ms > limit={rtt_limit*1000:.1f}ms. Exiting SS.")
+                                    self.hystart_found_ss_exit = True
+                                    self.ssthresh = self.cwnd_bytes # Set ssthresh to current window
+                                    self.state = STATE_CONGESTION_AVOIDANCE
+                                    self.enter_cubic_congestion_avoidance()
+                        # --- End HyStart++ Logic ---
                 # accumulate acked bytes
                 for s in newly_acked:
                     if s in self.sent_packets:
@@ -490,17 +554,28 @@ class Server:
         print(f"[Plotting] CWND plot saved to cwnd_plot_{self.port}.png")
 
     # --- main run loop ---
-    def get_next_rto_delay(self):
-        if not self.sent_packets:
-            return 0.001
-        try:
-            oldest = next(iter(self.sent_packets))
-            _pkt, send_time, _ = self.sent_packets[oldest]
-            expiry = send_time + self.rto
-            delay = expiry - time.time()
-            return max(0.001, delay)
-        except StopIteration:
-            return 1.0
+    def get_next_wait_time(self):
+        now = time.time()
+        
+        # 1. RTO timer
+        rto_wait = 1.0 # Default long poll
+        if self.sent_packets:
+            try:
+                oldest = next(iter(self.sent_packets))
+                _pkt, send_time, _ = self.sent_packets[oldest]
+                expiry = send_time + self.rto
+                rto_wait = max(0.0, expiry - now)
+            except StopIteration:
+                pass
+        
+        # 2. Pacing timer
+        pace_wait = 1.0
+        inflight = self.next_seq_num - self.base_seq_num
+        if inflight < self.cwnd_bytes:
+             pace_wait = max(0.0, self.next_paced_send_time - now)
+
+        # Return the smallest non-negative wait time, min 1ms
+        return max(0.001, min(rto_wait, pace_wait))
 
     def run(self):
         try:
@@ -534,7 +609,7 @@ class Server:
                 print("Connection dead, shutting down.")
                 running = False
                 break
-            timeout_delay = self.get_next_rto_delay()
+            timeout_delay = self.get_next_wait_time()
             try:
                 readable, _, _ = select.select([self.socket], [], [], timeout_delay)
                 if readable:
