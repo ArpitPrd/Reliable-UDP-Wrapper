@@ -91,7 +91,7 @@ class Server:
         self.ack_credits = 0.0
 
         # CUBIC params (still used as loss fallback)
-        self.C = 1.0
+        self.C = 1.2
         self.beta_cubic = 0.9
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
