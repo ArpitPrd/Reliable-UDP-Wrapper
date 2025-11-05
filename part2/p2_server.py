@@ -65,6 +65,8 @@ class Server:
         self.eof_sent_seq = -1
         self.connection_dead = False
 
+        self.q_delay = 0.0
+
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
@@ -133,6 +135,13 @@ class Server:
             self.rttvar = (1 - BETA) * self.rttvar + BETA * abs(self.srtt - rtt_sample)
             self.srtt = (1 - ALPHA) * self.srtt + ALPHA * rtt_sample
         
+
+        # --- NEW ADAPTIVE LOGIC ---
+        # Update our "sensor" for queuing delay
+        if self.rtt_min != float('inf'):
+            self.q_delay = max(0.0, self.srtt - self.rtt_min)
+        # --- END NEW ---
+
         new_rto = self.srtt + K * self.rttvar
         
         if self.rto == 0:
@@ -221,8 +230,15 @@ class Server:
             print("[TIMEOUT] RTO. Reducing cwnd.")
             self.in_rto_recovery = True
             
-            # Less aggressive reduction - maintain more throughput against UDP
-            self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
+            # --- MODIFIED ADAPTIVE LOGIC ---
+            # If q_delay is high (> 20% of min RTT), back off like standard CUBIC (beta=0.7)
+            # Otherwise (low delay), assume loss is random/bursty and be aggressive (beta=0.9)
+            q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
+            beta_reduction = 0.7 if self.q_delay > q_delay_threshold else 0.9
+            
+            self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
+            # --- END MODIFIED ---
+
             self.cwnd_bytes = self.ssthresh
             self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
             self.state = STATE_CONGESTION_AVOIDANCE
@@ -335,8 +351,13 @@ class Server:
             if self.dup_ack_count == 3:
                 print("3 Dup-ACKs. Fast Retransmit.")
                 
-                # Less aggressive window reduction
-                self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)  # Changed from beta_cubic
+                # --- MODIFIED ADAPTIVE LOGIC ---
+                # Use the same logic as in the RTO handler
+                q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
+                beta_reduction = 0.7 if self.q_delay > q_delay_threshold else 0.9
+                
+                self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
+                # --- END MODIFIED ---
                 self.cwnd_bytes = self.ssthresh
                 self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
@@ -418,9 +439,14 @@ class Server:
                     rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
                     t_elapsed = time.time() - self.t_last_congestion
                     
-                    # More aggressive alpha for faster convergence
-                    # Standard CUBIC calculations
-                    alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
+                    # --- MODIFIED ADAPTIVE LOGIC ---
+                    # If queue is building, be less aggressive (alpha=3.0)
+                    # If queue is empty, be super aggressive (alpha=6.0)
+                    q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
+                    alpha_multiplier = 3.0 if self.q_delay > q_delay_threshold else 6.0
+                    
+                    alpha_cubic = (alpha_multiplier * self.beta_cubic / (2.0 - self.beta_cubic))
+                    # --- END MODIFIED ---
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
 
                     # CUBIC growth curve
@@ -433,8 +459,11 @@ class Server:
                     
                     inc_per_ack = 0.0
                     if self.cwnd_bytes < target_cwnd:
-                        # More aggressive growth rate
-                        inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                        # --- MODIFIED ADAPTIVE LOGIC ---
+                        # Also scale the "super aggressive" part based on sensed queue delay
+                        growth_multiplier = 1.5 if self.q_delay > q_delay_threshold else 3.0
+                        inc_per_ack = growth_multiplier * (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                        # --- END MODIFIED ---
                     else:
                         inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
                     
