@@ -72,8 +72,6 @@ class Server:
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
         self.ssthresh =  200 * MSS_BYTES
 
-        self.next_send_time = 0.0
-
         # RTO
         self.rto = INITIAL_RTO
         self.srtt = 0.0
@@ -249,30 +247,14 @@ class Server:
 
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
+        # small deterministic startup jitter (only while there is no inflight)
+        # if inflight == 0 and self.startup_delay > 0:
+        #     time.sleep(self.startup_delay)
 
-        # if we have no RTT estimate yet, use INITIAL_RTO as conservative proxy
-        rtt_est = self.srtt if self.srtt > 0 else INITIAL_RTO
+        # apply rate targeting on each send cycle if we have an estimator
+        # self._apply_rate_targeting()
 
         while inflight < self.cwnd_bytes:
-            # pacing: compute per-packet spacing to approximate cwnd / rtt send-rate
-            now = time.time()
-
-            # Avoid tiny sleeps when cwnd is small; require at least payload-sized window
-            if self.cwnd_bytes > PAYLOAD_SIZE:
-                # send_rate_bps ~ cwnd_bytes / rtt_est
-                # per-packet spacing (seconds) = (payload_bytes * 8) / send_rate_bps
-                # simplification -> spacing = (PAYLOAD_SIZE) / (cwnd_bytes) * rtt_est
-                pacing_interval = (PAYLOAD_SIZE / float(self.cwnd_bytes)) * max(rtt_est, INITIAL_RTO)
-                # clamp to a reasonable lower bound to avoid busy-looping
-                pacing_interval = max(0.00005, min(pacing_interval, 0.1))
-            else:
-                pacing_interval = 0.0
-
-            # if it's not yet time to send, return control so select() can run and handle ACKs
-            if now < self.next_send_time:
-                break
-
-            # fetch next content
             if self.connection_dead:
                 break
             data, seq_num, flags = self.get_next_content()
@@ -282,7 +264,9 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
+                # time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
+                # print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
                 if e.errno in [11, 35, 10035]:
                     if flags & EOF_FLAG:
@@ -300,17 +284,8 @@ class Server:
                 print(f"Error in send_new_data: {e}")
                 self.connection_dead = True
                 break
-
-            # schedule next send
-            if pacing_interval > 0:
-                self.next_send_time = time.time() + pacing_interval
-            else:
-                # immediate next
-                self.next_send_time = time.time()
-
             if flags & EOF_FLAG:
                 break
-
             inflight = self.next_seq_num - self.base_seq_num
 
     # --- ACK processing ---
