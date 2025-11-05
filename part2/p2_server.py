@@ -33,7 +33,7 @@ ALPHA = 0.125  # Standard: 1/8
 BETA = 0.25    # Standard: 1/4
 K = 4.0        # Standard: 4
 INITIAL_RTO = 0.3 # 150ms is fine for this low-latency network
-MIN_RTO = 0.1
+MIN_RTO = 0.05
 
 # Minimum cwnd in bytes (stay able to probe)
 MIN_CWND = 4 * MSS_BYTES
@@ -68,9 +68,9 @@ class Server:
         # Congestion control
         self.state = STATE_SLOW_START
         # offset_factor = (self.port % 7) / 7.0
-        self.cwnd_bytes = 32 * MSS_BYTES
+        self.cwnd_bytes = 48 * MSS_BYTES
         # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
-        self.ssthresh =  600 * MSS_BYTES
+        self.ssthresh =  800 * MSS_BYTES
 
         # RTO
         self.rto = INITIAL_RTO
@@ -92,7 +92,7 @@ class Server:
 
         # CUBIC params (still used as loss fallback)
         self.C = 0.4
-        self.beta_cubic = 0.7
+        self.beta_cubic = 0.8
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -222,9 +222,9 @@ class Server:
             self.in_rto_recovery = True
             
             # Less aggressive reduction - maintain more throughput against UDP
-            self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)
-            self.cwnd_bytes = self.ssthresh
-            self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+            self.ssthresh = max(int(self.cwnd_bytes * 0.85), 4 * MSS_BYTES)
+            self.cwnd_bytes = max(self.ssthresh, 8 * MSS_BYTES)
+            self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
             self.state = STATE_CONGESTION_AVOIDANCE
             self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
@@ -261,8 +261,8 @@ class Server:
         pacing_delay = 0.0
         if self.srtt > 0 and self.cwnd_bytes > 0:
             packets_in_cwnd = self.cwnd_bytes / PAYLOAD_SIZE
-            pacing_delay = self.srtt / (2.0 * packets_in_cwnd)  # Send at 2x rate
-            pacing_delay = max(0.0001, min(pacing_delay, 0.001))  # Clamp to reasonable
+            pacing_delay = self.srtt / (4.0 * packets_in_cwnd)  # Send at 2x rate
+            pacing_delay = max(0.00005, min(pacing_delay, 0.0005))  # Clamp to reasonable
 
         while inflight < self.cwnd_bytes:
             if self.connection_dead:
@@ -336,9 +336,9 @@ class Server:
                 print("3 Dup-ACKs. Fast Retransmit.")
                 
                 # Less aggressive window reduction
-                self.ssthresh = max(int(self.cwnd_bytes * self.beta_cubic), 2 * MSS_BYTES)  # Changed from beta_cubic
-                self.cwnd_bytes = self.ssthresh
-                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.ssthresh = max(int(self.cwnd_bytes * 0.85), 4 * MSS_BYTES)  # Changed from beta_cubic
+                self.cwnd_bytes = max(self.ssthresh, 6 * MSS_BYTES)
+                self.cwnd_bytes = max(self.cwnd_bytes, 6 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
                 self.enter_cubic_congestion_avoidance()
                 
@@ -396,31 +396,29 @@ class Server:
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
                 self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
-                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
                 if self.t_last_congestion == 0:
-                    # Reno-like additive increase
+                    # Reno-like additive increase - MORE AGGRESSIVE
                     if self.cwnd_bytes > 0:
-                        inc = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
+                        inc = 1.5 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)  # 1.5x standard
                         self.ack_credits += inc
                         if self.ack_credits >= 1.0:
                             i = int(self.ack_credits)
                             self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
                             self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
-
                             self.ack_credits -= i
                 else:
-                    # CUBIC-like growth
+                    # CUBIC-like growth - MORE AGGRESSIVE
                     rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
                     t_elapsed = time.time() - self.t_last_congestion
                     
-                    # More aggressive alpha for faster convergence
-                    # Standard CUBIC calculations
-                    alpha_cubic = (3.0 * self.beta_cubic / (2.0 - self.beta_cubic))
+                    # More aggressive alpha for faster convergence against UDP
+                    alpha_cubic = (4.0 * self.beta_cubic / (2.0 - self.beta_cubic))  # Changed from 3.0
                     w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
 
                     # CUBIC growth curve
@@ -433,10 +431,10 @@ class Server:
                     
                     inc_per_ack = 0.0
                     if self.cwnd_bytes < target_cwnd:
-                        # More aggressive growth rate
-                        inc_per_ack = (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
+                        # More aggressive growth rate - 2x multiplier for UDP competition
+                        inc_per_ack = 2.0 * (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                     else:
-                        inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
+                        inc_per_ack = 1.5 * (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
                     
                     self.ack_credits += inc_per_ack
                     
@@ -444,7 +442,6 @@ class Server:
                         i = int(self.ack_credits)
                         self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
                         self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
-
                         self.ack_credits -= i
 
             # After ack processing, also nudge cwnd toward rate-target (if estimator present)
