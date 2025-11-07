@@ -99,8 +99,9 @@ class Server:
         # --- Queue delay gradient tracking ---
         self.prev_q_delay = 0.0
         self.q_delay_time = time.time()
-        self.q_grad_threshold = 0.004  # sec/sec; threshold for rapid queue buildup (~4ms per second)
-        self.q_grad_reduction = 0.7    # cwnd reduction multiplier (reduce by 30%)
+        self.q_grad_threshold = 0.012  # sec/sec; threshold for rapid queue buildup (~4ms per second)
+        self.q_grad_reduction = 0.8    # cwnd reduction multiplier (reduce by 30%)
+        self.q_grad_filter = 0.7       # for exponential smoothing
 
 
         # logging
@@ -144,14 +145,16 @@ class Server:
             # --- Compute queue delay gradient ---
             now = time.time()
             dt = max(1e-6, now - self.q_delay_time)
-            q_grad = (self.q_delay - self.prev_q_delay) / dt
+            q_grad_raw = (self.q_delay - self.prev_q_delay) / dt
+            q_grad = self.q_grad_filter * getattr(self, "q_grad", 0.0) + (1 - self.q_grad_filter) * q_grad_raw
+            self.q_grad = q_grad
             self.prev_q_delay = self.q_delay
             self.q_delay_time = now
 
             # --- React to fast-growing queue ---
-            if q_grad > self.q_grad_threshold and self.cwnd_bytes > 8 * MSS_BYTES and time.time() - self.last_grad_adjust > self.srtt:
+            if q_grad > self.q_grad_threshold and time.time() - self.last_grad_adjust > 2 * self.srtt:
                 old_cwnd = self.cwnd_bytes
-                self.cwnd_bytes = max(int(self.cwnd_bytes * self.q_grad_reduction), 4 * MSS_BYTES)
+                self.cwnd_bytes = max(int(self.cwnd_bytes * self.q_grad_reduction), 16 * MSS_BYTES)
                 self.ssthresh = max(int(self.cwnd_bytes * 0.8), 8 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
                 self.enter_cubic_congestion_avoidance()
@@ -161,10 +164,10 @@ class Server:
             # --- React to shrinking queue (aggressive growth) ---
             if q_grad < -self.q_grad_threshold / 2 and self.state == STATE_CONGESTION_AVOIDANCE and time.time() - self.last_grad_adjust > self.srtt:
                 # If queue delay is rapidly decreasing, expand cwnd
-                growth_factor = 1.0 + min(0.25, abs(q_grad) * 10)  # up to +25% growth
+                growth_factor = 1.0 + min(0.5, abs(q_grad) * 15)  # up to +25% growth
                 old_cwnd = self.cwnd_bytes
                 self.cwnd_bytes = min(int(self.cwnd_bytes * growth_factor), MAX_CWND)
-                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.cwnd_bytes = max(self.cwnd_bytes, 16 * MSS_BYTES)
                 self.ssthresh = max(int(self.cwnd_bytes * 0.8), 8 * MSS_BYTES)
                 self.log_cwnd()
                 # print(f"[QDELAY EXPAND] q_grad={q_grad:.5f}, cwnd {old_cwnd}->{self.cwnd_bytes}")
@@ -264,7 +267,7 @@ class Server:
             self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
 
             self.cwnd_bytes = self.ssthresh
-            self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+            self.cwnd_bytes = max(self.cwnd_bytes, 16 * MSS_BYTES)
             self.state = STATE_CONGESTION_AVOIDANCE
             self.enter_cubic_congestion_avoidance()
             self.log_cwnd()
@@ -304,7 +307,7 @@ class Server:
             
             if self.srtt > 0 and self.cwnd_bytes > 0:
                 packets_in_cwnd = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
-                pacing_delay = max(0.0003, self.srtt / packets_in_cwnd)
+                pacing_delay = max(0.0001, self.srtt / (2.5*packets_in_cwnd))
                 pacing_delay *= random.uniform(0.92, 1.08)
                 time.sleep(pacing_delay)
 
@@ -373,7 +376,7 @@ class Server:
                 self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
 
                 self.cwnd_bytes = self.ssthresh
-                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.cwnd_bytes = max(self.cwnd_bytes, 16 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
                 self.enter_cubic_congestion_avoidance()
                 
@@ -428,7 +431,7 @@ class Server:
             # Update cwnd: slow start or congestion avoidance
             if self.state == STATE_SLOW_START:
                 self.cwnd_bytes = min(self.cwnd_bytes + acked_bytes, MAX_CWND)
-                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.cwnd_bytes = max(self.cwnd_bytes, 16 * MSS_BYTES)
                 # early switch to CA after modest cwnd (helps avoid synchronized overshoot)
                 if self.cwnd_bytes >= self.ssthresh:
                     self.state = STATE_CONGESTION_AVOIDANCE
@@ -467,7 +470,7 @@ class Server:
                 if self.ack_credits >= 1.0:
                     i = int(self.ack_credits)
                     self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                    self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                    self.cwnd_bytes = max(self.cwnd_bytes, 16 * MSS_BYTES)
 
                     self.ack_credits -= i
 
