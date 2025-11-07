@@ -99,7 +99,7 @@ class Server:
         # --- Queue delay gradient tracking ---
         self.prev_q_delay = 0.0
         self.q_delay_time = time.time()
-        self.q_grad_threshold = 0.04  # sec/sec; threshold for rapid queue buildup (~4ms per second)
+        self.q_grad_threshold = 0.004  # sec/sec; threshold for rapid queue buildup (~4ms per second)
         self.q_grad_reduction = 0.7    # cwnd reduction multiplier (reduce by 30%)
 
 
@@ -289,8 +289,12 @@ class Server:
             if self.connection_dead:
                 break
             
-            if pacing_delay > 0 and inflight > 0:
+            if self.srtt > 0 and self.cwnd_bytes > 0:
+                packets_in_cwnd = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
+                pacing_delay = max(0.0003, self.srtt / packets_in_cwnd)
+                pacing_delay *= random.uniform(0.92, 1.08)
                 time.sleep(pacing_delay)
+
 
             data, seq_num, flags = self.get_next_content()
             if data is None:
