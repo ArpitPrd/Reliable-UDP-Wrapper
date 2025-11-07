@@ -26,13 +26,11 @@ EOF_FLAG = 0x4
 # States
 STATE_SLOW_START = 1
 STATE_CONGESTION_AVOIDANCE = 2
-# STATE_FAST_RECOVERY = 3
 
-# RTO constants
-ALPHA = 0.125  # Standard: 1/8
-BETA = 0.25    # Standard: 1/4
-K = 4.0        # Standard: 4
-INITIAL_RTO = 0.3 # 150ms is fine for this low-latency network
+ALPHA = 0.125
+BETA = 0.25  
+K = 4.0      
+INITIAL_RTO = 0.3
 MIN_RTO = 0.1
 
 # Minimum cwnd in bytes (stay able to probe)
@@ -69,9 +67,7 @@ class Server:
 
         # Congestion control
         self.state = STATE_SLOW_START
-        # offset_factor = (self.port % 7) / 7.0
         self.cwnd_bytes = 32 * MSS_BYTES
-        # self.startup_delay = offset_factor * 0.0015  # tiny deterministic phase (ms-scale)
         self.ssthresh =  600 * MSS_BYTES
 
         # RTO
@@ -100,8 +96,12 @@ class Server:
         self.t_last_congestion = 0.0
         self.K = 0.0
 
-        # initial deterministic phase offset used in enter_cubic
-        # self.phase_offset = (self.port % 5) * 0.025
+        # --- Queue delay gradient tracking ---
+        self.prev_q_delay = 0.0
+        self.q_delay_time = time.time()
+        self.q_grad_threshold = 0.004  # sec/sec; threshold for rapid queue buildup (~4ms per second)
+        self.q_grad_reduction = 0.7    # cwnd reduction multiplier (reduce by 30%)
+
 
         # logging
         self.cwnd_log_file = None
@@ -112,7 +112,6 @@ class Server:
         if self.state == STATE_SLOW_START: return "SS"
         if self.state == STATE_CONGESTION_AVOIDANCE:
             return "CUBIC" if self.t_last_congestion > 0 else "CA"
-        # if self.state == STATE_FAST_RECOVERY: return "FR"
         return "UNK"
 
     def pack_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
@@ -136,11 +135,27 @@ class Server:
             self.srtt = (1 - ALPHA) * self.srtt + ALPHA * rtt_sample
         
 
-        # --- NEW ADAPTIVE LOGIC ---
         # Update our "sensor" for queuing delay
         if self.rtt_min != float('inf'):
             self.q_delay = max(0.0, self.srtt - self.rtt_min)
-        # --- END NEW ---
+
+            # --- Compute queue delay gradient ---
+            now = time.time()
+            dt = max(1e-6, now - self.q_delay_time)
+            q_grad = (self.q_delay - self.prev_q_delay) / dt
+            self.prev_q_delay = self.q_delay
+            self.q_delay_time = now
+
+            # --- React to fast-growing queue ---
+            if q_grad > self.q_grad_threshold and self.cwnd_bytes > 8 * MSS_BYTES:
+                old_cwnd = self.cwnd_bytes
+                self.cwnd_bytes = max(int(self.cwnd_bytes * self.q_grad_reduction), 4 * MSS_BYTES)
+                self.ssthresh = max(int(self.cwnd_bytes * 0.8), 8 * MSS_BYTES)
+                self.state = STATE_CONGESTION_AVOIDANCE
+                self.enter_cubic_congestion_avoidance()
+                self.log_cwnd()
+                # print(f"[QDELAY BACKOFF] q_grad={q_grad:.5f}, cwnd {old_cwnd}->{self.cwnd_bytes}")
+
 
         new_rto = self.srtt + K * self.rttvar
         
@@ -195,7 +210,7 @@ class Server:
     # --- CUBIC bookkeeping ---
     def enter_cubic_congestion_avoidance(self):
         # deterministic phase shift
-        self.t_last_congestion = time.time()# - self.phase_offset
+        self.t_last_congestion = time.time()
         new_w_max = self.cwnd_bytes
         if new_w_max < self.w_max_bytes:
             self.w_max_last_bytes = self.w_max_bytes
@@ -230,14 +245,10 @@ class Server:
             print("[TIMEOUT] RTO. Reducing cwnd.")
             self.in_rto_recovery = True
             
-            # --- MODIFIED ADAPTIVE LOGIC ---
-            # If q_delay is high (> 20% of min RTT), back off like standard CUBIC (beta=0.7)
-            # Otherwise (low delay), assume loss is random/bursty and be aggressive (beta=0.9)
             q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
             beta_reduction = 0.7 if self.q_delay > q_delay_threshold else 0.9
             
             self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
-            # --- END MODIFIED ---
 
             self.cwnd_bytes = self.ssthresh
             self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
@@ -246,7 +257,7 @@ class Server:
             self.log_cwnd()
             
             # Faster RTO recovery
-            self.rto = min(self.rto * 1.5, 3.0)  # Changed from 1.5 and cap at 2s instead of 3s
+            self.rto = min(self.rto * 1.5, 3.0)
             self.dup_ack_count = 0
 
 
@@ -267,12 +278,6 @@ class Server:
 
     def send_new_data(self):
         inflight = self.next_seq_num - self.base_seq_num
-        # small deterministic startup jitter (only while there is no inflight)
-        # if inflight == 0 and self.startup_delay > 0:
-        #     time.sleep(self.startup_delay)
-
-        # apply rate targeting on each send cycle if we have an estimator
-        # self._apply_rate_targeting()
 
         pacing_delay = 0.0
         if self.srtt > 0 and self.cwnd_bytes > 0:
@@ -294,7 +299,6 @@ class Server:
             packet = header + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                # time.sleep(0.0005)
                 self.sent_packets[seq_num] = (packet, time.time(), 0)
                 # print(f"[SEND] seq={seq_num}, inflight={self.next_seq_num - self.base_seq_num}, cwnd={int(self.cwnd_bytes)}, state={self.get_state_str()}")
             except OSError as e:
@@ -338,12 +342,6 @@ class Server:
             if sack_start in self.sent_packets:
                 self.sacked_packets.add(sack_start)
 
-            # if sack_start > 0 and sack_end > sack_start:
-            #     if sack_start in self.sent_packets:
-            #         self.sacked_packets.add(sack_start)
-
-            # --- END NEW LOGIC ---
-
         # Duplicate ACK
         if cum_ack == self.base_seq_num:
             self.dup_ack_count += 1
@@ -351,13 +349,12 @@ class Server:
             if self.dup_ack_count == 3:
                 print("3 Dup-ACKs. Fast Retransmit.")
                 
-                # --- MODIFIED ADAPTIVE LOGIC ---
                 # Use the same logic as in the RTO handler
                 q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
                 beta_reduction = 0.7 if self.q_delay > q_delay_threshold else 0.9
                 
                 self.ssthresh = max(int(self.cwnd_bytes * beta_reduction), 8 * MSS_BYTES)
-                # --- END MODIFIED ---
+
                 self.cwnd_bytes = self.ssthresh
                 self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
                 self.state = STATE_CONGESTION_AVOIDANCE
@@ -370,9 +367,6 @@ class Server:
                         break
                 
                 self.log_cwnd()
-            
-            # If dup_ack_count > 3, CUBIC does nothing. It waits for the
-            # new ACK to signal recovery from this loss event.
 
             if self.cwnd_bytes != old_cwnd or self.ssthresh != old_ssthresh or self.state != old_state:
                 self.log_cwnd()
@@ -423,61 +417,42 @@ class Server:
                     self.state = STATE_CONGESTION_AVOIDANCE
                     self.enter_cubic_congestion_avoidance()
             elif self.state == STATE_CONGESTION_AVOIDANCE:
-                if self.t_last_congestion == 0:
-                    # Reno-like additive increase
-                    if self.cwnd_bytes > 0:
-                        inc = (PAYLOAD_SIZE * PAYLOAD_SIZE) / float(self.cwnd_bytes)
-                        self.ack_credits += inc
-                        if self.ack_credits >= 1.0:
-                            i = int(self.ack_credits)
-                            self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                            self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                # CUBIC-like growth
+                rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
+                t_elapsed = time.time() - self.t_last_congestion
+                
+                # If queue is building, be less aggressive (alpha=3.0)
+                # If queue is empty, be super aggressive (alpha=6.0)
+                q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
+                alpha_multiplier = 3.0 if self.q_delay > q_delay_threshold else 6.0
+                
+                alpha_cubic = (alpha_multiplier * self.beta_cubic / (2.0 - self.beta_cubic))
+                w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
 
-                            self.ack_credits -= i
+                # CUBIC growth curve
+                t_now_minus_K = t_elapsed - self.K
+                w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
+
+                # Use max of TCP-friendly and CUBIC window
+                target_cwnd = max(w_cubic_now, w_tcp)
+                target_cwnd = min(target_cwnd, MAX_CWND)
+                
+                inc_per_ack = 0.0
+                if self.cwnd_bytes < target_cwnd:
+                    # Also scale the "super aggressive" part based on sensed queue delay
+                    growth_multiplier = 1.5 if self.q_delay > q_delay_threshold else 3.0
+                    inc_per_ack = growth_multiplier * (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
                 else:
-                    # CUBIC-like growth
-                    rtt_min_sec = self.rtt_min if self.rtt_min != float('inf') else max(self.srtt, INITIAL_RTO)
-                    t_elapsed = time.time() - self.t_last_congestion
-                    
-                    # --- MODIFIED ADAPTIVE LOGIC ---
-                    # If queue is building, be less aggressive (alpha=3.0)
-                    # If queue is empty, be super aggressive (alpha=6.0)
-                    q_delay_threshold = self.rtt_min * 0.20 if self.rtt_min != float('inf') else 0.05
-                    alpha_multiplier = 3.0 if self.q_delay > q_delay_threshold else 6.0
-                    
-                    alpha_cubic = (alpha_multiplier * self.beta_cubic / (2.0 - self.beta_cubic))
-                    # --- END MODIFIED ---
-                    w_tcp = self.ssthresh + alpha_cubic * (t_elapsed / rtt_min_sec) * PAYLOAD_SIZE
+                    inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
+                
+                self.ack_credits += inc_per_ack
+                
+                if self.ack_credits >= 1.0:
+                    i = int(self.ack_credits)
+                    self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
+                    self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
 
-                    # CUBIC growth curve
-                    t_now_minus_K = t_elapsed - self.K
-                    w_cubic_now = self.C * (t_now_minus_K ** 3) + self.w_max_bytes
-
-                    # Use max of TCP-friendly and CUBIC window
-                    target_cwnd = max(w_cubic_now, w_tcp)
-                    target_cwnd = min(target_cwnd, MAX_CWND)
-                    
-                    inc_per_ack = 0.0
-                    if self.cwnd_bytes < target_cwnd:
-                        # --- MODIFIED ADAPTIVE LOGIC ---
-                        # Also scale the "super aggressive" part based on sensed queue delay
-                        growth_multiplier = 1.5 if self.q_delay > q_delay_threshold else 3.0
-                        inc_per_ack = growth_multiplier * (target_cwnd - self.cwnd_bytes) * PAYLOAD_SIZE / self.cwnd_bytes
-                        # --- END MODIFIED ---
-                    else:
-                        inc_per_ack = (PAYLOAD_SIZE * PAYLOAD_SIZE) / self.cwnd_bytes
-                    
-                    self.ack_credits += inc_per_ack
-                    
-                    if self.ack_credits >= 1.0:
-                        i = int(self.ack_credits)
-                        self.cwnd_bytes = min(self.cwnd_bytes + i, MAX_CWND)
-                        self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
-
-                        self.ack_credits -= i
-
-            # After ack processing, also nudge cwnd toward rate-target (if estimator present)
-            # self._apply_rate_targeting()
+                    self.ack_credits -= i
 
             # final check for EOF ack
             if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
@@ -498,7 +473,7 @@ class Server:
             return
         try:
             ts = time.time() - self.start_time
-            self.cwnd_log_file.write(f"{ts:.4f},{int(self.cwnd_bytes)},{int(self.ssthresh)},{self.get_state_str()}\n")
+            self.cwnd_log_file.write(f"{ts},{self.cwnd_bytes},{self.srtt},{self.q_delay},{self.prev_q_delay}\n")
         except Exception:
             pass
 
@@ -556,7 +531,7 @@ class Server:
                 print("Timed out waiting for initial client.")
                 self.socket.close()
                 return
-            packet, self.client_addr = self.socket.recvfrom(1024)
+            hs_packet, self.client_addr = self.socket.recvfrom(1024)
             print(f"Client connected from {self.client_addr}")
         except Exception as e:
             print(f"Error receiving initial request: {e}")
@@ -622,7 +597,6 @@ class Server:
         if self.cwnd_log_file:
             self.cwnd_log_file.close()
             print(f"CWND log saved to {self.log_filename}")
-            self.plot_cwnd(self.log_filename)
         time.sleep(0.5)
         self.socket.close()
 

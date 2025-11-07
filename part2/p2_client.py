@@ -92,10 +92,6 @@ class Client:
         header = self.pack_header(0, ack_num, flags, sack_start, sack_end)
         try:
             self.socket.sendto(header, self.server_addr)
-            # if sack_start > 0:
-            #     print(f"Sent ACK for: {ack_num} with SACK [{sack_start}, {sack_end})")
-            # else:
-            #     print(f"Sent ACK for: {ack_num}")
         except Exception as e:
             print(f"Error sending ACK {ack_num}: {e}")
 
