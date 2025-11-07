@@ -125,6 +125,8 @@ class Server:
 
     # --- RTO / RTT updates ---
     def update_rto(self, rtt_sample):
+        self.last_grad_adjust = getattr(self, "last_grad_adjust", 0)
+
         self.rtt_min = min(self.rtt_min, rtt_sample)
         if self.srtt == 0.0:
             self.srtt = rtt_sample
@@ -147,7 +149,7 @@ class Server:
             self.q_delay_time = now
 
             # --- React to fast-growing queue ---
-            if q_grad > self.q_grad_threshold and self.cwnd_bytes > 8 * MSS_BYTES:
+            if q_grad > self.q_grad_threshold and self.cwnd_bytes > 8 * MSS_BYTES and time.time() - self.last_grad_adjust > self.srtt:
                 old_cwnd = self.cwnd_bytes
                 self.cwnd_bytes = max(int(self.cwnd_bytes * self.q_grad_reduction), 4 * MSS_BYTES)
                 self.ssthresh = max(int(self.cwnd_bytes * 0.8), 8 * MSS_BYTES)
@@ -155,6 +157,17 @@ class Server:
                 self.enter_cubic_congestion_avoidance()
                 self.log_cwnd()
                 # print(f"[QDELAY BACKOFF] q_grad={q_grad:.5f}, cwnd {old_cwnd}->{self.cwnd_bytes}")
+
+            # --- React to shrinking queue (aggressive growth) ---
+            if q_grad < -self.q_grad_threshold / 2 and self.state == STATE_CONGESTION_AVOIDANCE and time.time() - self.last_grad_adjust > self.srtt:
+                # If queue delay is rapidly decreasing, expand cwnd
+                growth_factor = 1.0 + min(0.25, abs(q_grad) * 10)  # up to +25% growth
+                old_cwnd = self.cwnd_bytes
+                self.cwnd_bytes = min(int(self.cwnd_bytes * growth_factor), MAX_CWND)
+                self.cwnd_bytes = max(self.cwnd_bytes, 4 * MSS_BYTES)
+                self.ssthresh = max(int(self.cwnd_bytes * 0.8), 8 * MSS_BYTES)
+                self.log_cwnd()
+                # print(f"[QDELAY EXPAND] q_grad={q_grad:.5f}, cwnd {old_cwnd}->{self.cwnd_bytes}")
 
 
         new_rto = self.srtt + K * self.rttvar
