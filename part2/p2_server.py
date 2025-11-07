@@ -99,7 +99,7 @@ class Server:
         # --- Queue delay gradient tracking ---
         self.prev_q_delay = 0.0
         self.q_delay_time = time.time()
-        self.q_grad_threshold = 0.0004  # sec/sec; threshold for rapid queue buildup (~4ms per second)
+        self.q_grad_threshold = 0.04  # sec/sec; threshold for rapid queue buildup (~4ms per second)
         self.q_grad_reduction = 0.7    # cwnd reduction multiplier (reduce by 30%)
 
 
