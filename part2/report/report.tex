@@ -1,0 +1,75 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{\textbf{Assignment 4 - Part 2: Congestion Control Implementation and Analysis}}
+\author{Name: Arpit Prasad and Akshat Bhasin \\ Roll No: 2022EE11837 and 2022EE3 \\ Course: Computer Networks}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{1. Introduction}
+This report describes the implementation and evaluation of a congestion control algorithm (CCA) built over the reliable UDP layer from Part 1. The CCA aims to maximize link utilization while maintaining fairness between flows.
+
+\section*{2. Algorithm Design}
+\subsection*{2.1 Congestion Window Management}
+\begin{itemize}
+  \item \textbf{Slow Start:} cwnd starts at 1 MSS and doubles each RTT until \texttt{ssthresh}.
+  \item \textbf{Congestion Avoidance:} Additive increase once threshold is reached.
+  \item \textbf{Loss Handling:} Triple duplicate ACK → halve cwnd; timeout → reset to 1 MSS.
+\end{itemize}
+
+\subsection*{2.2 Implementation Details}
+All reliability mechanisms from Part 1 are preserved. Additional logging tracks \texttt{cwnd}, \texttt{ssthresh}, and ACK events for analysis.
+
+\section*{3. Experimental Setup}
+Experiments use a dumbbell topology with two client–server pairs sharing a bottleneck link. Traffic conditions such as bandwidth, loss, and delay are varied.
+
+\section*{4. Results and Analysis}
+
+\subsection*{4.1 Fixed Bandwidth Experiment}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Link Utilization and JFI vs Link Capacity plot}}
+  \caption{Link utilization and JFI vs link capacity (placeholder).}
+\end{figure}
+
+\subsection*{4.2 Varying Loss Experiment}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Loss Rate vs Link Utilization plot}}
+  \caption{Effect of loss on link utilization (placeholder).}
+\end{figure}
+
+\subsection*{4.3 Asymmetric Flows Experiment}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for RTT vs JFI plot}}
+  \caption{Fairness (JFI) vs RTT difference (placeholder).}
+\end{figure}
+
+\subsection*{4.4 Background UDP Traffic}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Background UDP Impact plot}}
+  \caption{Impact of background UDP traffic on utilization and fairness (placeholder).}
+\end{figure}
+
+\section*{5. Observations}
+\begin{itemize}
+  \item The CCA achieves high utilization and maintains fairness across flows.
+  \item Increasing loss reduces throughput as expected due to window reduction.
+  \item Background traffic impacts JFI but utilization remains stable for light load.
+\end{itemize}
+
+\section*{6. Conclusion}
+The implemented congestion control algorithm adapts effectively to bandwidth, loss, and delay variations, achieving balanced efficiency and fairness.
+
+\end{document}

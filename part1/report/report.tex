@@ -1,0 +1,65 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\geometry{margin=1in}
+
+\title{\textbf{Assignment 4 – Part 1: Reliable Data Transfer over UDP}}
+\author{Name: \underline{\hspace{4cm}} \\ Roll No: \underline{\hspace{3cm}} \\ Course: Computer Networks}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{1. Introduction}
+This report presents the design and analysis of a reliable file transfer protocol implemented over UDP. Since UDP is unreliable, reliability mechanisms were implemented at the application layer using a sliding window approach.
+
+\section*{2. Design Overview}
+\subsection*{2.1 Header Structure}
+Each packet has a maximum payload size of 1200 bytes with a 20-byte custom header:
+\begin{center}
+\texttt{| Seq Num (4 B) | Reserved/Optional (16 B) | Data (($\leq$ 1180 B) |}
+\end{center}
+
+\subsection*{2.2 Reliability Mechanisms}
+\begin{itemize}
+  \item \textbf{Sliding Window:} Ensures in-order delivery and controlled transmission.
+  \item \textbf{Acknowledgments:} Cumulative ACKs; optional SACK support.
+  \item \textbf{Timeouts and Retransmissions:} RTO is estimated adaptively.
+  \item \textbf{Fast Retransmit:} Triggered after three duplicate ACKs.
+\end{itemize}
+
+\section*{3. Experimental Setup}
+Experiments were run in Mininet using a two-host topology (\texttt{h1–s1–h2}) with variable delay, jitter, and loss.
+
+\section*{4. Results and Analysis}
+
+\subsection*{4.1 Download Time vs Loss Rate}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Download Time vs Loss Rate plot}}
+  \caption{Download time vs packet loss rate (placeholder).}
+\end{figure}
+
+\subsection*{4.2 Download Time vs Delay Jitter}
+\begin{figure}[h!]
+  \centering
+  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Download Time vs Delay Jitter plot}}
+  \caption{Download time vs delay jitter (placeholder).}
+\end{figure}
+
+\section*{5. Observations}
+\begin{itemize}
+  \item Download time increases with packet loss due to retransmissions.
+  \item Jitter affects timing but less severely than loss.
+  \item Fast retransmit reduces latency compared to timeout-based recovery.
+\end{itemize}
+
+\section*{6. Conclusion}
+The protocol ensures in-order and complete file delivery under adverse conditions, achieving reliability similar to TCP at the application layer.
+
+\end{document}

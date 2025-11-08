@@ -60,7 +60,7 @@ class Server:
 
         # Congestion control
         self.state = STATE_SLOW_START
-        self.cwnd_bytes = 32 * MSS_BYTES
+        self.cwnd_bytes = MSS_BYTES
         self.ssthresh = 600 * MSS_BYTES
 
         # RTT/RTO
