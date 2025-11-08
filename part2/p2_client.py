@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import socket
 import sys
 import time
@@ -6,16 +5,18 @@ import struct
 import os
 import heapq
 
-HEADER_FORMAT = "!I16s"   # 4-byte seq or ack + 16 bytes reserved
+HEADER_FORMAT = "!IIHII2x"
 SIZE_OF_HEADER = 20
-MSS_BYTES = 1200
-PAYLOAD_SIZE = MSS_BYTES - SIZE_OF_HEADER
+MSS_BYTES = 1200  
+PAYLOAD_SIZE = MSS_BYTES - SIZE_OF_HEADER  
+
+# Flags 
+SYN_FLAG = 0x1
+ACK_FLAG = 0x2
+EOF_FLAG = 0x4
 
 # Receive Window
 MAX_RECV_WINDOW_PACKETS = 2000
-
-EOF_MARKER = b"EOF"
-
 
 class Client:
     def __init__(self, server_ip, server_port, output_filename):
@@ -23,76 +24,68 @@ class Client:
         self.output_filename = output_filename
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.settimeout(30.0)
-
+        
         self.output_file = None
         self.start_time = 0
 
         # Receiver State
         self.next_expected_seq_num = 0
-
-        # Receive Buffer (min-heap by seq)
+        
+        # Receive Buffer
         self.receive_buffer = []
         self.receive_buffer_seqs = set()
-
+        
         print(f"Client ready to connect to {server_ip}:{server_port}")
-        print(f"Will save incoming file to: {output_filename}")
+        print(f"Will save the incoming file to: {output_filename}")
 
-    # ---------------- header helpers ----------------
-    def prepare_header_for_request(self):
-        return b'\x01'  # small one byte request
-
-    def prepare_ack(self, ack_num, sack_blocks=None):
+    def prepare_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
         """
-        Prepare and send an ACK packet:
-        - first 4 bytes: ack_num (next expected byte)
-        - reserved 16 bytes: up to two SACK blocks packed as 4 uint32s
-          [sack1_start, sack1_end, sack2_start, sack2_end]
+        provides the packed header
         """
-        if sack_blocks is None:
-            reserved = struct.pack("!IIII", 0, 0, 0, 0)
-        else:
-            vals = []
-            for i in range(2):
-                if i < len(sack_blocks):
-                    s, e = sack_blocks[i]
-                    vals.extend([s, e])
-                else:
-                    vals.extend([0, 0])
-            reserved = struct.pack("!IIII", *vals)
-        pkt = struct.pack(HEADER_FORMAT, ack_num, reserved)
-        try:
-            self.socket.sendto(pkt, self.server_addr)
-        except Exception as e:
-            print(f"Error sending ACK {ack_num}: {e}")
+        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags, sack_start, sack_end)
 
     def read_header(self, packet):
-        """Unpack header: returns (first32, reserved_bytes, data_bytes)"""
+        """
+        black box to upack your header
+        """
         try:
-            first32, reserved = struct.unpack(HEADER_FORMAT, packet[:SIZE_OF_HEADER])
+            seq_num, ack_num, flags, sack_start, sack_end = struct.unpack(HEADER_FORMAT, packet[:SIZE_OF_HEADER])
             data = packet[SIZE_OF_HEADER:]
-            return first32, reserved, data
+            return seq_num, ack_num, flags, sack_start, sack_end, data
         except struct.error:
-            return None, None, None
+            return None, None, None, None, None, None
 
-    # ---------------- receive helpers ----------------
     def send_small_bit_request(self):
+        """
+        use this to send request, will provide only 5 tries
+        """
         sample_request_packet = b'\x01'
         retries = 5
         for i in range(retries):
             try:
-                print(f"Requesting file (attempt {i+1}/{retries})...")
+                print(f"Requesting File (Attempt Number {i+1}/{retries})...")
                 self.socket.sendto(sample_request_packet, self.server_addr)
                 packet, _ = self.socket.recvfrom(MSS_BYTES)
-                print("Received first packet, connection established.")
-                return packet
+                print("Yahoo! Received first packet, connection established.")
+                return packet  
             except socket.timeout:
                 print("Request timed out.")
                 continue
             except Exception as e:
                 print(f"Error sending request: {e}")
                 return None
-        print("Failed to connect after 5 attempts.")
+        print("Failed to connect to server after 5 attempts.")
         return None
+
+    def prepare_ack(self, ack_num, flags=ACK_FLAG, sack_start=0, sack_end=0):
+        """
+        Use this when want to prepare an ACK
+        """
+        header_of_packet = self.prepare_header(0, ack_num, flags, sack_start, sack_end)
+        try:
+            self.socket.sendto(header_of_packet, self.server_addr)
+        except Exception as e:
+            print(f"Error sending ACK {ack_num}: {e}")
 
     def write_to_txt(self, data):
         try:
@@ -103,105 +96,89 @@ class Client:
     def update_rwnd(self):
         return max(0, MAX_RECV_WINDOW_PACKETS - len(self.receive_buffer))
 
-    def get_sack_blocks_from_buffer(self):
-        """
-        Produce up to two contiguous SACK blocks (start,end) from current buffered out-of-order packets.
-        The buffer is a heap of (seq, data, flags) entries.
-        """
+    def get_first_sack_block_unit(self):
         if not self.receive_buffer:
-            return []
-        # gather sorted sequences
-        sorted_buf = sorted(self.receive_buffer)
-        blocks = []
-        i = 0
-        while i < len(sorted_buf) and len(blocks) < 2:
-            seq0, data0, flags0 = sorted_buf[i]
-            start = seq0
-            end = start + len(data0)
-            j = i + 1
-            while j < len(sorted_buf):
-                seqj, dataj, flagsj = sorted_buf[j]
-                if seqj <= end:
-                    end = max(end, seqj + len(dataj))
-                    j += 1
-                else:
-                    break
-            blocks.append((start, end))
-            i = j
-        return blocks
+            return 0, 0
+        
+        try:
+            seq_num, data, flags = self.receive_buffer[0]
+            return seq_num, seq_num + len(data)
+        except (ValueError, KeyError, IndexError):
+             return 0, 0
 
     def process_packet(self, packet):
-        first32, reserved, data = self.read_header(packet)
-        if first32 is None:
-            return "CONTINUE"
-        seq_num = first32
-        # parse reserved as 4 uint32s for SACK if needed
-        # but for data packets reserved is typically zeros
-        # print debug
-        # print(f"Received seq#={seq_num}, next_expected={self.next_expected_seq_num}")
+        seq_num, ack_num, flags, sack_start, sack_end, data = self.read_header(packet)
+        print(f"Received seq#={seq_num}, sending ack for={self.next_expected_seq_num}")
+        if seq_num is None:
+            return "CONTINUE" # Bad packet
+        
         # Check for EOF
-        if data == EOF_MARKER:
+        if flags & EOF_FLAG:
             if seq_num == self.next_expected_seq_num:
-                # send final ACK acknowledging EOF
-                self.prepare_ack(seq_num)
-                print("Received EOF in-order. Sending final ACK.")
+                self.prepare_ack(seq_num, flags=ACK_FLAG | EOF_FLAG)
+                print("Received EOF, sending the final ACK.")
                 return "DONE"
             else:
-                # out-of-order EOF — buffer it
                 if seq_num > self.next_expected_seq_num and seq_num not in self.receive_buffer_seqs:
-                    heapq.heappush(self.receive_buffer, (seq_num, data, 0))
+                    heapq.heappush(self.receive_buffer, (seq_num, data, flags))
                     self.receive_buffer_seqs.add(seq_num)
-                sack_blocks = self.get_sack_blocks_from_buffer()
-                self.prepare_ack(self.next_expected_seq_num, sack_blocks=sack_blocks)
+                
+                sack_start_block, sack_end_block = self.get_first_sack_block_unit()
+                self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
                 return "CONTINUE"
 
-        # Process data packet
+        # Process Data Packet
+        
+        # 1. Got the packet we expected
         if seq_num == self.next_expected_seq_num:
-            # in-order packet
             self.write_to_txt(data)
             self.next_expected_seq_num += len(data)
-            # flush any buffered contiguous blocks
+            
             while self.receive_buffer and self.receive_buffer[0][0] == self.next_expected_seq_num:
-                buffered_seq_num, buffered_data, _ = heapq.heappop(self.receive_buffer)
+                buffered_seq_num, buffered_data, buffered_flags = heapq.heappop(self.receive_buffer)
                 self.receive_buffer_seqs.remove(buffered_seq_num)
-                if buffered_data == EOF_MARKER:
-                    # buffered EOF, acknowledge and finish
-                    self.prepare_ack(self.next_expected_seq_num)
+                
+                if buffered_flags & EOF_FLAG:
                     print("Processing buffered EOF.")
+                    self.prepare_ack(self.next_expected_seq_num + 1, flags=ACK_FLAG | EOF_FLAG)
                     return "DONE"
+                
                 self.write_to_txt(buffered_data)
                 self.next_expected_seq_num += len(buffered_data)
-            sack_blocks = self.get_sack_blocks_from_buffer()
-            self.prepare_ack(self.next_expected_seq_num, sack_blocks=sack_blocks)
+            
+            sack_start_block, sack_end_block = self.get_first_sack_block_unit()
+            self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
 
+        # 2. Got a packet from the future (out-of-order)
         elif seq_num > self.next_expected_seq_num:
-            # out-of-order, buffer it
             if seq_num not in self.receive_buffer_seqs:
                 if len(self.receive_buffer) < MAX_RECV_WINDOW_PACKETS:
-                    heapq.heappush(self.receive_buffer, (seq_num, data, 0))
+                    heapq.heappush(self.receive_buffer, (seq_num, data, flags))
                     self.receive_buffer_seqs.add(seq_num)
                 else:
                     print("Receive buffer full, dropping packet.")
-            # advertise SACK block for this out-of-order packet
-            sack_blocks = [(seq_num, seq_num + len(data))]
-            self.prepare_ack(self.next_expected_seq_num, sack_blocks=sack_blocks)
+            
+            self.prepare_ack(self.next_expected_seq_num, sack_start=seq_num, sack_end=seq_num + len(data))
 
+        # 3. Got a packet from the past (already ACKed)
         else:
-            # seq_num < next_expected_seq_num => duplicate, re-ACK
-            sack_blocks = self.get_sack_blocks_from_buffer()
-            self.prepare_ack(self.next_expected_seq_num, sack_blocks=sack_blocks)
+            sack_start_block, sack_end_block = self.get_first_sack_block_unit()
+            self.prepare_ack(self.next_expected_seq_num, sack_start=sack_start_block, sack_end=sack_end_block)
 
         return "CONTINUE"
 
+
     def run(self):
+        """Main client loop."""
+        
         # 1. Send request and get first packet
         first_packet = self.send_small_bit_request()
         if first_packet is None:
             self.socket.close()
             return
-
+            
         self.start_time = time.time()
-
+        
         # 2. Open output file
         try:
             self.output_file = open(self.output_filename, 'wb')
@@ -210,35 +187,34 @@ class Client:
             self.socket.close()
             return
 
-        # 3. Process first packet
+        # 3. Process the first packet
         if self.process_packet(first_packet) == "DONE":
             self.cleanup()
             return
-
+            
         # 4. Main receive loop
         running = True
         while running:
             try:
                 packet, _ = self.socket.recvfrom(MSS_BYTES)
-                status = self.process_packet(packet)
-                if status == "DONE":
+                if self.process_packet(packet) == "DONE":
                     running = False
+                    
             except socket.timeout:
-                print("Server timed out. Closing connection.")
+                print("Server timed out. Will have to Closing connection.")
                 running = False
             except Exception as e:
                 print(f"Receive loop error: {e}")
                 running = False
-
+        
         # 5. Cleanup
         self.cleanup()
 
     def cleanup(self):
         end_time = time.time()
         duration = end_time - self.start_time
-        if duration == 0:
-            duration = 1e-6
-
+        if duration == 0: duration = 1e-6
+        
         if self.output_file:
             self.output_file.close()
             file_size = 0
@@ -253,29 +229,27 @@ class Client:
                 print(f"Duration: {duration:.2f} seconds")
             print(f"Saved to: {self.output_filename}")
             print(f"File size: {file_size} bytes")
-            if duration > 0.001 and file_size > 0:
-                throughput = (file_size * 8) / (duration * 1_000_000)  # Mbps
+            if duration > 0.001:
+                throughput = (file_size * 8) / (duration * 1_000_000) # Mbps
                 print(f"Avg. Throughput: {throughput:.2f} Mbps")
             print("---------------------------------")
-
+            
         self.socket.close()
         print("Client shut down.")
-
 
 def main():
     if len(sys.argv) != 4:
         print("Usage: python3 p2_client.py <SERVER_IP> <SERVER_PORT> <PREF_FILENAME>")
         sys.exit(1)
-
+    
     server_ip = sys.argv[1]
     server_port = int(sys.argv[2])
     pref_filename = sys.argv[3]
-
+    
     output_filename = f"{pref_filename}received_data.txt"
-
+    
     client = Client(server_ip, server_port, output_filename)
     client.run()
-
 
 if __name__ == "__main__":
     main()
