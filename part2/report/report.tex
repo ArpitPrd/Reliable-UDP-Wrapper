@@ -15,61 +15,52 @@
 \begin{document}
 \maketitle
 
-\section*{1. Introduction}
-This report describes the implementation and evaluation of a congestion control algorithm (CCA) built over the reliable UDP layer from Part 1. The CCA aims to maximize link utilization while maintaining fairness between flows.
+\section{Fixed Bandwidth Experiment}
 
-\section*{2. Algorithm Design}
-\subsection*{2.1 Congestion Window Management}
-\begin{itemize}
-  \item \textbf{Slow Start:} cwnd starts at 1 MSS and doubles each RTT until \texttt{ssthresh}.
-  \item \textbf{Congestion Avoidance:} Additive increase once threshold is reached.
-  \item \textbf{Loss Handling:} Triple duplicate ACK → halve cwnd; timeout → reset to 1 MSS.
-\end{itemize}
+\textbf{Observation:} From the plot, we observe that the Jain’s Fairness Index (JFI) remains constant and equal to 1 across all link capacities, indicating perfect fairness among flows. However, the link utilization decreases sharply as link capacity increases.
 
-\subsection*{2.2 Implementation Details}
-All reliability mechanisms from Part 1 are preserved. Additional logging tracks \texttt{cwnd}, \texttt{ssthresh}, and ACK events for analysis.
+\textbf{Reason:} The constant JFI = 1, shows the CCA correctly maintains the fairness of in the given topology. Howver the dropping link utilisation is an effect of the having a fixed queue size on the switches, which limits the max throughput with which files may be transferred from the server to the client. Hence, as bandwidth increases, the link utilisation decreases.
 
-\section*{3. Experimental Setup}
-Experiments use a dumbbell topology with two client–server pairs sharing a bottleneck link. Traffic conditions such as bandwidth, loss, and delay are varied.
-
-\section*{4. Results and Analysis}
-
-\subsection*{4.1 Fixed Bandwidth Experiment}
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Link Utilization and JFI vs Link Capacity plot}}
-  \caption{Link utilization and JFI vs link capacity (placeholder).}
+  \includegraphics[width=0.6\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_fixed_bandwidth.png}
+  \caption{Link utilization and JFI vs link capacity }
 \end{figure}
 
-\subsection*{4.2 Varying Loss Experiment}
+\section{Varying Loss Experiment}
+
+\textbf{Observation:} Link utilization decreases significantly with increasing packet loss rate. The curve shows a steep decline as loss increases from 0\% to 2\%.
+
+\textbf{Reason:} As the loss rate increases, the reliability algorithm resends packets, hence taking larger time to deliver the a single packet. This leads to reduced throughput and hence reduced link utilisation
+
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Loss Rate vs Link Utilization plot}}
-  \caption{Effect of loss on link utilization (placeholder).}
+  \includegraphics[width=0.6\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_varying_loss.png}
+  \caption{Effect of loss on link utilization }
 \end{figure}
 
-\subsection*{4.3 Asymmetric Flows Experiment}
+\section{Asymmetric Flows Experiment}
+
+\textbf{Observation:} The JFI remains constant and equal to 1 even when one flow experiences increasing RTT delay. This shows that the system maintains fairness regardless of delay asymmetry.
+
+\textbf{Reason:} Since TCP Cubic ideas are implemented, it is made RTT independent and hence does not produce a bias towards smaller RTT connections. Hence JFI is close to 1.
+
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for RTT vs JFI plot}}
-  \caption{Fairness (JFI) vs RTT difference (placeholder).}
+  \includegraphics[width=0.6\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png}
+  \caption{Fairness (JFI) vs RTT difference }
 \end{figure}
 
-\subsection*{4.4 Background UDP Traffic}
+\section{Background UDP Traffic}
+
+\textbf{Observation:} As the background UDP load increases (from Light to Heavy), link utilization decreases slightly, while JFI remains nearly 1. This indicates fairness is preserved even under heavy interference.
+
+\textbf{Reason:} Since the queue size on the switches are fixed, therefore when another bursty flow is introduced it keeps the high percentage of the queue occupied. This causes the loss of packets sent based on reliability, which leads to retransmission, hence decrease in throughput and link utilisation.
+
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Background UDP Impact plot}}
-  \caption{Impact of background UDP traffic on utilization and fairness (placeholder).}
+  \includegraphics[width=0.6\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png}
+  \caption{Impact of background UDP traffic on utilization and fairness }
 \end{figure}
-
-\section*{5. Observations}
-\begin{itemize}
-  \item The CCA achieves high utilization and maintains fairness across flows.
-  \item Increasing loss reduces throughput as expected due to window reduction.
-  \item Background traffic impacts JFI but utilization remains stable for light load.
-\end{itemize}
-
-\section*{6. Conclusion}
-The implemented congestion control algorithm adapts effectively to bandwidth, loss, and delay variations, achieving balanced efficiency and fairness.
 
 \end{document}
