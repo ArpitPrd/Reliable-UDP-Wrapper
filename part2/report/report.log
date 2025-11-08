@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (MiKTeX 25.4) (preloaded format=pdflatex 2025.8.13)  8 NOV 2025 15:26
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (MiKTeX 25.4) (preloaded format=pdflatex 2025.8.13)  8 NOV 2025 15:40
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -362,20 +362,17 @@ Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable
 
 LaTeX Warning: `!h' float specifier changed to `!ht'.
 
-</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png, id=22, 722.7pt x 433.62pt>
-File: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png Graphic file (type png)
-<use /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png>
-Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png  used on input line 50.
-(pdftex.def)             Requested size: 271.7835pt x 163.07025pt.
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
 
 
 [1
 
 {/home/arpit/.miktex/texmfs/data/fonts/map/pdftex/pdftex.map} </home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_fixed_bandwidth.png>]
-</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png, id=34, 722.7pt x 433.62pt>
+</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png, id=34, 722.7pt x 433.62pt>
+File: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png Graphic file (type png)
+<use /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png>
+Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_asymmetric_flows.png  used on input line 50.
+(pdftex.def)             Requested size: 271.7835pt x 163.07025pt.
+</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png, id=35, 722.7pt x 433.62pt>
 File: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png Graphic file (type png)
 <use /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png>
 Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part2/p2_fairness_background_udp.png  used on input line 62.
@@ -397,17 +394,17 @@ Package rerunfilecheck Info: File `report.out' has not changed.
 (rerunfilecheck)             Checksum: DAF7BCC10D1A569E2454BB8E3456D521;686.
  ) 
 Here is how much of TeX's memory you used:
- 11095 strings out of 468135
- 178591 string characters out of 5435616
- 594111 words of memory out of 5000000
- 39601 multiletter control sequences out of 15000+600000
- 632054 words of font info for 58 fonts, out of 8000000 for 9000
+ 11098 strings out of 468135
+ 178645 string characters out of 5435616
+ 593115 words of memory out of 5000000
+ 39604 multiletter control sequences out of 15000+600000
+ 632894 words of font info for 61 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  75i,6n,79p,685b,449s stack positions out of 10000i,1000n,20000p,200000b,200000s
-</home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr12.pfb>
-Output written on report.pdf (3 pages, 205412 bytes).
+</home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmmi10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr12.pfb>
+Output written on report.pdf (3 pages, 214823 bytes).
 PDF statistics:
- 71 PDF objects out of 1000 (max. 8388607)
+ 76 PDF objects out of 1000 (max. 8388607)
  12 named destinations out of 1000 (max. 500000)
  53 words of extra memory for PDF output out of 10000 (max. 10000000)
 

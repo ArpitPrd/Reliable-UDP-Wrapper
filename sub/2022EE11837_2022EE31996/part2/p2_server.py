@@ -8,10 +8,9 @@ import csv
 import select
 import collections
 import random
-import os
 
 # --- Constants ---
-HEADER_FORMAT = "!I16s"   # 4-byte seq/ack + 16 bytes reserved
+HEADER_FORMAT = "!IIHII2x"
 SIZE_OF_HEADER = 20
 MSS_BYTES = 1200
 PAYLOAD_SIZE = MSS_BYTES - SIZE_OF_HEADER
@@ -21,17 +20,16 @@ MAX_CWND = 8 * 1024 * 1024
 STATE_SS = 1
 STATE_CA = 2
 
+# Flags
+SYN_FLAG = 0x1
+ACK_FLAG = 0x2
+EOF_FLAG = 0x4
+
 ALPHA = 0.125
 BETA = 0.25
+K = 4.0
 INITIAL_RTO = 0.3
 MIN_RTO = 0.1
-
-# CUBIC parameters defaults (kept similar to original)
-C_DEFAULT = 0.4
-BETA_CUBIC_DEFAULT = 0.7
-
-# EOF marker (payload)
-EOF_MARKER = b"EOF"
 
 
 class Server:
@@ -43,7 +41,7 @@ class Server:
         self.socket.setblocking(False)
         self.client_addr = None
         self.is_in_rto_recovery = False
-        print(f"Server started on {self.ip}:{self.port_no}")
+        print(f"Server started on the following details {self.ip}:{self.port_no}")
 
         # load file
         try:
@@ -78,13 +76,13 @@ class Server:
         self.ack_worth_count = 0.0
 
         # Buffers
-        self.curr_in_flight_packets = collections.OrderedDict()  # seq -> (packet_bytes, send_time, retrans_count)
+        self.curr_in_flight_packets = collections.OrderedDict()
         self.n_dup_ack = 0
         self.sacked_packets = set()
 
         # CUBIC parameters
-        self.C = C_DEFAULT
-        self.beta_cubic = BETA_CUBIC_DEFAULT
+        self.C = 0.4
+        self.beta_cubic = 0.7
         self.w_max_bytes = 0.0
         self.w_max_last_bytes = 0.0
         self.t_last_congestion = 0.0
@@ -103,43 +101,15 @@ class Server:
         self.cwnd_log_file = None
         self.log_filename = f"cwnd_log_{self.port_no}.csv"
 
-    # ---------------- header helpers ----------------
-    def prepare_header_for_data(self, seq_num):
-        """Pack a data packet header: seq_num + 16 bytes zero reserved"""
-        return struct.pack(HEADER_FORMAT, seq_num, b'\x00' * 16)
-
-    def prepare_ack_packet(self, ack_num, sack_blocks=None):
-        """
-        Pack an ACK packet: first 4 bytes = ack_num, reserved area holds up to two SACK blocks as 4 uint32s:
-        [sack1_start, sack1_end, sack2_start, sack2_end]
-        """
-        if sack_blocks is None:
-            reserved = struct.pack("!IIII", 0, 0, 0, 0)
-        else:
-            # sack_blocks is list of (start,end) pairs, up to 2
-            vals = []
-            for i in range(2):
-                if i < len(sack_blocks):
-                    s, e = sack_blocks[i]
-                    vals.extend([s, e])
-                else:
-                    vals.extend([0, 0])
-            reserved = struct.pack("!IIII", *vals)
-        return struct.pack(HEADER_FORMAT, ack_num, reserved)
+    def prepare_header(self, seq_num, ack_num, flags, sack_start=0, sack_end=0):
+        return struct.pack(HEADER_FORMAT, seq_num, ack_num, flags, sack_start, sack_end)
 
     def read_header(self, packet):
-        """
-        Unpack header into (first32, reserved_bytes)
-        For data packets the first32 is seq_num.
-        For ACK packets the first32 is ack_num.
-        """
         try:
-            first32, reserved = struct.unpack(HEADER_FORMAT, packet[:SIZE_OF_HEADER])
-            return first32, reserved
+            return struct.unpack(HEADER_FORMAT, packet[:SIZE_OF_HEADER])
         except struct.error:
-            return None, None
+            return None
 
-    # ---------------- RTO / RTT / queuing ----------------
     def update_queueing_delays(self):
         if self.rtt_min == float('inf'):
             return
@@ -182,7 +152,7 @@ class Server:
             self.ssthresh = max(int(self.cwnd_bytes * 0.95), 8 * MSS_BYTES)
             self.log_cwnd()
             self.last_grad_adjust = now
-
+    
     def update_rto(self, rtt_sample):
         self.rtt_min = min(self.rtt_min, rtt_sample)
         if self.rtt_curr == 0.0:
@@ -194,14 +164,14 @@ class Server:
 
         self.update_queueing_delays()
 
-        new_rto = self.rtt_curr + 4.0 * self.rtt_variance
+        new_rto = self.rtt_curr + K * self.rtt_variance
         if self.rto == 0:
             self.rto = max(MIN_RTO, new_rto)
         else:
             self.rto = 0.9 * self.rto + 0.1 * max(MIN_RTO, new_rto)
         self.rto = max(MIN_RTO, min(self.rto, 3.0))
 
-    # ---------------- packet send / resend ----------------
+
     def resend_packet(self, seq_num):
         if seq_num not in self.curr_in_flight_packets:
             return False
@@ -210,7 +180,7 @@ class Server:
             print("Packet resend limit reached. Aborting.")
             self.is_connection_dead = True
             return False
-        # update entry with incremented retrans count and new send time
+        del self.curr_in_flight_packets[seq_num]
         self.curr_in_flight_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
         try:
             self.socket.sendto(packet_data, self.client_addr)
@@ -236,29 +206,26 @@ class Server:
         now = time.time()
         for seq_num, (pkt, send_time, _) in list(self.curr_in_flight_packets.items()):
             if now - send_time > self.rto:
-                # treat as congestion event
                 self.cwnd_bytes = max(int(self.cwnd_bytes * 0.85), 8 * MSS_BYTES)
                 self.ssthresh = max(int(self.cwnd_bytes * 0.9), 8 * MSS_BYTES)
                 self.update_cubic_metrics()
                 self.log_cwnd()
-                # resend this packet
                 self.resend_packet(seq_num)
                 break
 
     def get_next_content(self):
-        """Return (data_bytes, seq, flags_unused). EOF returns b'EOF' as data."""
         if self.next_seq_num < self.file_size:
             start = self.next_seq_num
             end = min(start + PAYLOAD_SIZE, self.file_size)
             data = self.file_data[start:end]
             seq = start
             self.next_seq_num = end
-            return data, seq
+            return data, seq, 0
         elif self.eof_sent_seq == -1:
             self.eof_sent_seq = self.file_size
-            return EOF_MARKER, self.eof_sent_seq
+            return b"EOF", self.eof_sent_seq, EOF_FLAG
         else:
-            return None, -1
+            return None, -1, 0
 
     def send_new_data_from_file(self):
         n_bytes_in_flight = self.next_seq_num - self.curr_base_seq_num
@@ -270,21 +237,20 @@ class Server:
                 pacing_delay = max(0.0001, self.rtt_curr / (2.2 * n_pkts))
                 pacing_delay *= random.uniform(0.92, 1.08)
                 time.sleep(pacing_delay)
-            data, seq = self.get_next_content()
+            data, seq, flags = self.get_next_content()
             if data is None:
                 break
-            packet = self.prepare_header_for_data(seq) + data
+            packet = self.prepare_header(seq, 0, flags) + data
             try:
                 self.socket.sendto(packet, self.client_addr)
                 self.curr_in_flight_packets[seq] = (packet, time.time(), 0)
             except Exception:
                 self.is_connection_dead = True
                 break
-            if data == EOF_MARKER:
+            if flags & EOF_FLAG:
                 break
             n_bytes_in_flight = self.next_seq_num - self.curr_base_seq_num
 
-    # ---------------- SACK / ACK handling ----------------
     def update_sacked_packets(self, sack_start, sack_end):
         if sack_start > 0 and sack_end > sack_start:
             if sack_start in self.curr_in_flight_packets:
@@ -294,7 +260,6 @@ class Server:
         if cum_ack == self.curr_base_seq_num:
             self.n_dup_ack += 1
             if self.n_dup_ack == 3:
-                # fast retransmit / partial reduction
                 self.cwnd_bytes = max(int(self.cwnd_bytes * 0.85), 8 * MSS_BYTES)
                 self.update_cubic_metrics()
                 self.log_cwnd()
@@ -316,8 +281,7 @@ class Server:
             self.ack_worth_count -= i
         self.cwnd_bytes = max(self.cwnd_bytes, 8 * MSS_BYTES)
 
-    def handle_new_acks(self, cum_ack):
-        """Process new cumulative ack value cum_ack (bytes acked)."""
+    def handle_new_acks(self, cum_ack, flags):
         self.is_in_rto_recovery = False
         self.n_dup_ack = 0
         newly_acked = [s for s in list(self.curr_in_flight_packets.keys()) if s < cum_ack]
@@ -327,7 +291,6 @@ class Server:
             if newest in self.curr_in_flight_packets:
                 p_data, send_time, rc = self.curr_in_flight_packets[newest]
                 if rc == 0:
-                    # update RTT sample
                     self.update_rto(time.time() - send_time)
             for s in newly_acked:
                 if s in self.curr_in_flight_packets:
@@ -342,32 +305,23 @@ class Server:
             self.incoming_ack_with_ss(acked_bytes)
         elif self.state == STATE_CA:
             self.incoming_ack_with_ca(acked_bytes)
-        if cum_ack > self.eof_sent_seq and self.eof_sent_seq != -1:
+        if flags & EOF_FLAG and cum_ack > self.eof_sent_seq:
             return "DONE"
         return "CONTINUE"
 
     def process_incoming_ack(self, packet):
-        """Handle incoming ACK packet format: first4=ack_num, reserved=16 bytes with up to two SACK blocks."""
-        first32, reserved = self.read_header(packet)
-        if first32 is None:
+        header_fields = self.read_header(packet)
+        if header_fields is None:
             return
-        cum_ack = first32
-        # parse reserved as four uint32s
-        try:
-            s1, e1, s2, e2 = struct.unpack("!IIII", reserved)
-        except struct.error:
-            s1 = e1 = s2 = e2 = 0
-        # update sacked packets
-        if s1 > 0 and e1 > s1:
-            self.update_sacked_packets(s1, e1)
-        if s2 > 0 and e2 > s2:
-            self.update_sacked_packets(s2, e2)
-        # duplicate ack handling
+        seq_num, cum_ack, flags, sack_start, sack_end = header_fields
+        if not (flags & ACK_FLAG):
+            return
+        self.last_ack_time_sent_from_server = time.time()
+        self.update_sacked_packets(sack_start, sack_end)
         if self.handle_dup_acks(cum_ack):
             return "CONTINUE"
-        # new acks
         if cum_ack > self.curr_base_seq_num:
-            return self.handle_new_acks(cum_ack)
+            return self.handle_new_acks(cum_ack, flags)
         return "CONTINUE"
 
     def log_cwnd(self):
@@ -391,12 +345,12 @@ class Server:
         except StopIteration:
             return 1.0
 
-    # ---------------- main loop ----------------
     def run(self):
-        print("Waiting for client request...")
+        print("Waiting for some client request...")
         fd, _, _ = select.select([self.socket], [], [], 15.0)
         if not fd:
-            print("Timeout waiting for client. Exiting.")
+            print("Declaring time out waiting for client.")
+            print("and closing myself, peace")
             self.socket.close()
             return
         hs_packet, self.client_addr = self.socket.recvfrom(1024)
@@ -422,7 +376,6 @@ class Server:
             try:
                 fd, _, _ = select.select([self.socket], [], [], td)
                 if fd:
-                    # expect incoming ACKs (client->server)
                     ack_packet, _ = self.socket.recvfrom(MSS_BYTES)
                     if self.process_incoming_ack(ack_packet) == "DONE":
                         running = False
@@ -438,15 +391,12 @@ class Server:
             if not running:
                 break
 
-            # timeouts and sending
             self.handle_timeouts()
             self.send_new_data_from_file()
-            # detect idle timeout from client
             if time.time() - self.last_ack_time_sent_from_server > 30.0:
                 print("Client timed out (30s). Shutting down.")
                 running = False
 
-        # final stats and cleanup
         end_time = time.time()
         duration = max(end_time - self.start_time, 1e-6)
         throughput = (self.file_size * 8) / (duration * 1_000_000)

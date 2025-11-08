@@ -9,7 +9,7 @@
 \geometry{margin=1in}
 
 \title{\textbf{Assignment 4 - Part 2: Congestion Control Implementation and Analysis}}
-\author{Name: Arpit Prasad and Akshat Bhasin \\ Roll No: 2022EE11837 and 2022EE3 \\ Course: Computer Networks}
+\author{Name: Arpit Prasad and Akshat Bhasin \\ Roll No: 2022EE11837 and 2022EE31996 \\ Course: Computer Networks}
 \date{}
 
 \begin{document}
@@ -19,7 +19,7 @@
 
 \textbf{Observation:} From the plot, we observe that the Jain’s Fairness Index (JFI) remains constant and equal to 1 across all link capacities, indicating perfect fairness among flows. However, the link utilization decreases sharply as link capacity increases.
 
-\textbf{Reason:} The constant JFI = 1, shows the CCA correctly maintains the fairness of in the given topology. Howver the dropping link utilisation is an effect of the having a fixed queue size on the switches, which limits the max throughput with which files may be transferred from the server to the client. Hence, as bandwidth increases, the link utilisation decreases.
+\textbf{Reason:} The constant JFI = 1, shows the CCA correctly maintains the fairness of in the given topology. Howver the dropping link utilisation is an effect of the having a fixed queue size on the switches, which limits the max throughput with which files may be transferred from the server to the client. Hence, as bandwidth increases, the link utilisation decreases. Also, since we have put an upper limit to the cwnd, therefore sending rate does not scale with increasing bandwidth, again leading to decreased throughput.
 
 \begin{figure}[h!]
   \centering
@@ -31,7 +31,7 @@
 
 \textbf{Observation:} Link utilization decreases significantly with increasing packet loss rate. The curve shows a steep decline as loss increases from 0\% to 2\%.
 
-\textbf{Reason:} As the loss rate increases, the reliability algorithm resends packets, hence taking larger time to deliver the a single packet. This leads to reduced throughput and hence reduced link utilisation
+\textbf{Reason:} As the loss rate increases, the reliability algorithm resends packets, hence taking larger time to deliver the a single packet. This leads to reduced throughput and hence reduced link utilisation. Also, CUBIC responds less aggresivly to losses, since the $\beta$ is 0.7, therefore leading to only 30\% reduction in cwnd.
 
 \begin{figure}[h!]
   \centering
