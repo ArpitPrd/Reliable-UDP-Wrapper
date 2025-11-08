@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Part 1: High-Performance Reliable UDP Server
-Optimized for speed while maintaining reliability
-"""
-
 import socket
 import sys
 import time
@@ -12,33 +6,34 @@ import os
 from collections import defaultdict
 import select
 
-# Constants
+
 MAX_PAYLOAD = 1200
 HEADER_SIZE = 20
 MAX_DATA_SIZE = MAX_PAYLOAD - HEADER_SIZE
 
-# Very aggressive timing for maximum performance
-INITIAL_RTO = 0.06     # Start with 60ms RTO (very aggressive)
-MIN_RTO = 0.02         # 20ms minimum for fastest response
-MAX_RTO = 0.5          # 500ms maximum for faster recovery
-ALPHA = 0.125          # Classic TCP ALPHA for stability
-BETA = 0.25            # Classic TCP BETA
+
+INITIAL_RTO = 0.06     
+MIN_RTO = 0.02        
+MAX_RTO = 0.5       
+ALPHA = 0.125         
+BETA = 0.25            
 DUP_ACK_THRESHOLD = 3
 
 class ReliableUDPServer:
     def __init__(self, server_ip, server_port, sws):
         self.server_ip = server_ip
         self.server_port = server_port
-        self.sws = sws  # Use exact SWS from command line (NO congestion control in Part 1!)
+        self.sws = sws 
 
-        # Create and configure socket
+       
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Increase socket buffers for better performance
+        
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2*1024*1024)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2*1024*1024)
 
-        # Try to bind to the specified IP
+        
+        
         try:
             self.socket.bind((server_ip, server_port))
             print(f"Bound to {server_ip}:{server_port}")
@@ -59,7 +54,7 @@ class ReliableUDPServer:
         self.rto = INITIAL_RTO
         self.min_rtt = float('inf')
 
-        # Sliding window (NO congestion control - just fixed SWS)
+        
         self.base = 0
         self.next_seq = 0
         self.window = {}  # seq -> (data, send_time, retrans_count)
@@ -150,16 +145,16 @@ class ReliableUDPServer:
         # Calculate bytes in flight
         bytes_in_flight = len(self.window) * MAX_DATA_SIZE
 
-        # Available window is just the fixed SWS (no congestion control!)
+        
         available = self.sws - bytes_in_flight
 
         packets_sent = 0
-        max_burst = 200  # Send up to 200 packets at once for maximum throughput
+        max_burst = 200  
 
         while available >= MAX_DATA_SIZE and self.next_seq < self.file_size and packets_sent < max_burst:
             seq = self.next_seq
             
-            # Get pre-created packet
+            
             if seq in self.packet_cache:
                 packet = self.packet_cache[seq]
                 data_size = min(MAX_DATA_SIZE, self.file_size - seq)
@@ -200,24 +195,21 @@ class ReliableUDPServer:
                             self.update_rtt(rtt)
                     del self.window[seq]
 
-            # NO congestion control updates in Part 1!
-            # Just use fixed SWS
-
-            # Handle SACK blocks
+           
             if sack_blocks:
                 for start, end in sack_blocks:
                     self.highest_sacked = max(self.highest_sacked, end)
-                    # Remove SACKed packets from window
+                    
                     for seq in list(self.window.keys()):
                         if start <= seq < end:
                             del self.window[seq]
 
         elif ack_num == self.base:
-            # Duplicate ACK
+           
             self.dup_ack_count[ack_num] += 1
 
             if self.dup_ack_count[ack_num] == DUP_ACK_THRESHOLD:
-                # Fast retransmit
+                
                 self.fast_retransmit()
                 
     def fast_retransmit(self):
@@ -231,25 +223,25 @@ class ReliableUDPServer:
             size, _, count = self.window[self.base]
             self.window[self.base] = (size, time.time(), count + 1)
 
-            # NO congestion control in Part 1 - just retransmit!
+           
             
     def check_timeouts(self):
         """Check for packet timeouts - aggressive retransmission"""
         current_time = time.time()
         retransmitted = 0
-        max_retrans_per_check = 5  # Retransmit up to 5 packets per check for faster recovery
+        max_retrans_per_check = 5  
 
         for seq in sorted(self.window.keys()):
             if seq >= self.base and retransmitted < max_retrans_per_check:
                 size, send_time, retrans_count = self.window[seq]
 
-                # Aggressive timeout with limited backoff
+               
                 if retrans_count == 0:
                     timeout = self.rto
                 elif retrans_count == 1:
-                    timeout = self.rto * 1.3  # Mild backoff for first retry
+                    timeout = self.rto * 1.3  
                 else:
-                    timeout = self.rto * (1.5 ** min(retrans_count, 4))  # Cap backoff
+                    timeout = self.rto * (1.5 ** min(retrans_count, 4))  
 
                 if current_time - send_time > timeout:
                     if seq in self.packet_cache:
@@ -302,13 +294,13 @@ class ReliableUDPServer:
         
         # Main transmission loop
         while self.base < self.file_size or self.window:
-            # Use select with very short timeout for maximum responsiveness
+            
             readable, _, _ = select.select([self.socket], [], [], 0.0005)
 
             if readable:
-                # Process all available ACKs aggressively
+                
                 ack_count = 0
-                while ack_count < 200:  # Process up to 200 ACKs at once
+                while ack_count < 200: 
                     try:
                         ack_packet, addr = self.socket.recvfrom(MAX_PAYLOAD)
                         if addr == self.client_addr:
@@ -325,11 +317,11 @@ class ReliableUDPServer:
 
             # Check timeouts very frequently for fast recovery
             current_time = time.time()
-            if current_time - last_timeout_check > 0.002:  # Check every 2ms
+            if current_time - last_timeout_check > 0.002:  
                 self.check_timeouts()
                 last_timeout_check = current_time
 
-                # Also try to send more if window opened up
+              
                 self.send_window()
                 
             # Progress indicator

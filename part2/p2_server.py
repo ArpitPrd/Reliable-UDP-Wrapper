@@ -61,7 +61,7 @@ class Server:
         self.next_seq_num = 0
         self.curr_base_seq_num = 0
         self.eof_sent_seq = -1
-        self.connection_dead = False
+        self.is_connection_dead = False
 
         # RTT/RTO
         self.rto = INITIAL_RTO
@@ -76,7 +76,7 @@ class Server:
         self.ack_worth_count = 0.0
 
         # Buffers
-        self.sent_packets = collections.OrderedDict()
+        self.curr_in_flight_packets = collections.OrderedDict()
         self.n_dup_ack = 0
         self.sacked_packets = set()
 
@@ -111,7 +111,6 @@ class Server:
             return None
 
     def update_queueing_delays(self):
-        """Update queuing delay, gradient, and adjust cwnd based on delay trends."""
         if self.rtt_min == float('inf'):
             return
 
@@ -119,19 +118,15 @@ class Server:
         now = time.time()
         dt = max(1e-6, now - self.queuing_delay_time)
 
-        # Compute gradient and apply low-pass filtering
         queuing_grad_raw = (self.queuing_delay - self.prev_q_delay) / dt
         self.queuing_grad = self.q_grad_filter * self.queuing_grad + (1.0 - self.q_grad_filter) * queuing_grad_raw
         queuing_grad = self.queuing_grad
 
-        # Update previous and timing states
         self.prev_q_delay = self.queuing_delay
         self.queuing_delay_time = now
 
-        # Minimum refractory period to avoid rapid oscillation
         refractory = max(0.05, 3.0 * max(self.rtt_curr, 0.001))
 
-        # Case 1: Queue building up → reduce cwnd
         if queuing_grad > self.q_grad_threshold and (now - self.last_grad_adjust) > refractory:
             self.cwnd_bytes = max(int(self.cwnd_bytes * self.q_grad_prec_reduction), 8 * MSS_BYTES)
             self.ssthresh = max(int(self.cwnd_bytes * 0.9), 8 * MSS_BYTES)
@@ -141,7 +136,6 @@ class Server:
             self.last_grad_adjust = now
             return
 
-        # Case 2: Queue draining → increase cwnd cautiously
         if queuing_grad < -(self.q_grad_threshold / 2.0) and self.state == STATE_CA and (now - self.last_grad_adjust) > refractory:
             mult_cap = 1.25
             additive_cap = 32 * PAYLOAD_SIZE
@@ -160,7 +154,6 @@ class Server:
             self.last_grad_adjust = now
     
     def update_rto(self, rtt_sample):
-        """Update RTT estimations and invoke queuing delay tracking."""
         self.rtt_min = min(self.rtt_min, rtt_sample)
         if self.rtt_curr == 0.0:
             self.rtt_curr = rtt_sample
@@ -169,10 +162,8 @@ class Server:
             self.rtt_variance = (1 - BETA) * self.rtt_variance + BETA * abs(self.rtt_curr - rtt_sample)
             self.rtt_curr = (1 - ALPHA) * self.rtt_curr + ALPHA * rtt_sample
 
-        # Modularized: Handle queue delay gradient and cwnd adjustments
         self.update_queueing_delays()
 
-        # Update retransmission timeout (RTO)
         new_rto = self.rtt_curr + K * self.rtt_variance
         if self.rto == 0:
             self.rto = max(MIN_RTO, new_rto)
@@ -182,15 +173,15 @@ class Server:
 
 
     def resend_packet(self, seq_num):
-        if seq_num not in self.sent_packets:
+        if seq_num not in self.curr_in_flight_packets:
             return False
-        packet_data, send_time, retrans_count = self.sent_packets[seq_num]
+        packet_data, send_time, retrans_count = self.curr_in_flight_packets[seq_num]
         if retrans_count > 15:
             print("Packet resend limit reached. Aborting.")
-            self.connection_dead = True
+            self.is_connection_dead = True
             return False
-        del self.sent_packets[seq_num]
-        self.sent_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
+        del self.curr_in_flight_packets[seq_num]
+        self.curr_in_flight_packets[seq_num] = (packet_data, time.time(), retrans_count + 1)
         try:
             self.socket.sendto(packet_data, self.client_addr)
             return True
@@ -213,7 +204,7 @@ class Server:
 
     def handle_timeouts(self):
         now = time.time()
-        for seq_num, (pkt, send_time, _) in list(self.sent_packets.items()):
+        for seq_num, (pkt, send_time, _) in list(self.curr_in_flight_packets.items()):
             if now - send_time > self.rto:
                 self.cwnd_bytes = max(int(self.cwnd_bytes * 0.85), 8 * MSS_BYTES)
                 self.ssthresh = max(int(self.cwnd_bytes * 0.9), 8 * MSS_BYTES)
@@ -239,7 +230,7 @@ class Server:
     def send_new_data_from_file(self):
         n_bytes_in_flight = self.next_seq_num - self.curr_base_seq_num
         while n_bytes_in_flight < self.cwnd_bytes:
-            if self.connection_dead:
+            if self.is_connection_dead:
                 break
             if self.rtt_curr > 0 and self.cwnd_bytes > 0:
                 n_pkts = max(1.0, self.cwnd_bytes / PAYLOAD_SIZE)
@@ -252,9 +243,9 @@ class Server:
             packet = self.prepare_header(seq, 0, flags) + data
             try:
                 self.socket.sendto(packet, self.client_addr)
-                self.sent_packets[seq] = (packet, time.time(), 0)
+                self.curr_in_flight_packets[seq] = (packet, time.time(), 0)
             except Exception:
-                self.connection_dead = True
+                self.is_connection_dead = True
                 break
             if flags & EOF_FLAG:
                 break
@@ -262,7 +253,7 @@ class Server:
 
     def update_sacked_packets(self, sack_start, sack_end):
         if sack_start > 0 and sack_end > sack_start:
-            if sack_start in self.sent_packets:
+            if sack_start in self.curr_in_flight_packets:
                 self.sacked_packets.add(sack_start)
 
     def handle_dup_acks(self, cum_ack):
@@ -293,21 +284,21 @@ class Server:
     def handle_new_acks(self, cum_ack, flags):
         self.is_in_rto_recovery = False
         self.n_dup_ack = 0
-        newly_acked = [s for s in list(self.sent_packets.keys()) if s < cum_ack]
+        newly_acked = [s for s in list(self.curr_in_flight_packets.keys()) if s < cum_ack]
         acked_bytes = 0
         if newly_acked:
             newest = max(newly_acked)
-            if newest in self.sent_packets:
-                p_data, send_time, rc = self.sent_packets[newest]
+            if newest in self.curr_in_flight_packets:
+                p_data, send_time, rc = self.curr_in_flight_packets[newest]
                 if rc == 0:
                     self.update_rto(time.time() - send_time)
             for s in newly_acked:
-                if s in self.sent_packets:
-                    pktdata, _, _ = self.sent_packets[s]
+                if s in self.curr_in_flight_packets:
+                    pktdata, _, _ = self.curr_in_flight_packets[s]
                     pkt_len = len(pktdata) - SIZE_OF_HEADER
                     acked_bytes += max(pkt_len, 0)
         for s in newly_acked:
-            self.sent_packets.pop(s, None)
+            self.curr_in_flight_packets.pop(s, None)
             self.sacked_packets.discard(s)
         self.curr_base_seq_num = cum_ack
         if self.state == STATE_SS:
@@ -343,11 +334,11 @@ class Server:
             pass
 
     def get_next_rto_delay(self):
-        if not self.sent_packets:
+        if not self.curr_in_flight_packets:
             return 0.001
         try:
-            oldest = next(iter(self.sent_packets))
-            _, send_time, _ = self.sent_packets[oldest]
+            oldest = next(iter(self.curr_in_flight_packets))
+            _, send_time, _ = self.curr_in_flight_packets[oldest]
             expiry = send_time + self.rto
             delay = expiry - time.time()
             return max(0.001, delay)
@@ -355,10 +346,11 @@ class Server:
             return 1.0
 
     def run(self):
-        print("Waiting for client request...")
-        readable, _, _ = select.select([self.socket], [], [], 15.0)
-        if not readable:
-            print("Timed out waiting for client.")
+        print("Waiting for some client request...")
+        fd, _, _ = select.select([self.socket], [], [], 15.0)
+        if not fd:
+            print("Declaring time out waiting for client.")
+            print("and closing myself, peace")
             self.socket.close()
             return
         hs_packet, self.client_addr = self.socket.recvfrom(1024)
@@ -376,14 +368,14 @@ class Server:
 
         running = True
         while running:
-            if self.connection_dead:
+            if self.is_connection_dead:
                 print("Connection dead, shutting down.")
                 running = False
                 break
-            timeout_delay = self.get_next_rto_delay()
+            td = self.get_next_rto_delay()
             try:
-                readable, _, _ = select.select([self.socket], [], [], timeout_delay)
-                if readable:
+                fd, _, _ = select.select([self.socket], [], [], td)
+                if fd:
                     ack_packet, _ = self.socket.recvfrom(MSS_BYTES)
                     if self.process_incoming_ack(ack_packet) == "DONE":
                         running = False
@@ -408,12 +400,10 @@ class Server:
         end_time = time.time()
         duration = max(end_time - self.start_time, 1e-6)
         throughput = (self.file_size * 8) / (duration * 1_000_000)
-        print("---------------------------------")
         print("File transfer complete.")
         print(f"Duration: {duration:.2f} seconds")
         print(f"Total Data: {self.file_size} bytes")
         print(f"Throughput: {throughput:.2f} Mbps")
-        print("---------------------------------")
         if self.cwnd_log_file:
             self.cwnd_log_file.close()
             print(f"CWND log saved to {self.log_filename}")

@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (MiKTeX 25.4) (preloaded format=pdflatex 2025.8.13)  8 NOV 2025 08:44
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (MiKTeX 25.4) (preloaded format=pdflatex 2025.8.13)  8 NOV 2025 15:20
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -350,38 +350,47 @@ Package hyperref Info: Link coloring OFF on input line 15.
 \openout3 = `report.out'.
 
 
+Overfull \hbox (6.68106pt too wide) in paragraph at lines 25--26
+[]\OT1/cmtt/m/n/10.95 | 0-3 : ACK Number | 4-7 : SACK1 Start | 8-11 : SACK1 End | 12-15 : SACK2
+ []
 
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
+</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png, id=15, 714.0276pt x 424.9476pt>
+File: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png Graphic file (type png)
+<use /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png>
+Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png  used on input line 35.
+(pdftex.def)             Requested size: 362.37569pt x 215.66997pt.
 
 
 [1
 
-{/home/arpit/.miktex/texmfs/data/fonts/map/pdftex/pdftex.map}]
+{/home/arpit/.miktex/texmfs/data/fonts/map/pdftex/pdftex.map} </home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png>]
+</home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png, id=29, 714.0276pt x 424.9476pt>
+File: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png Graphic file (type png)
+<use /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png>
+Package pdftex.def Info: /home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png  used on input line 47.
+(pdftex.def)             Requested size: 362.37569pt x 215.66997pt.
 
-[2] (report.aux)
+
+[2 </home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png>] (report.aux)
  ***********
 LaTeX2e <2025-06-01> patch level 1
 L3 programming layer <2025-07-20>
  ***********
 Package rerunfilecheck Info: File `report.out' has not changed.
-(rerunfilecheck)             Checksum: D41D8CD98F00B204E9800998ECF8427E;0.
+(rerunfilecheck)             Checksum: 1A8A0CCD0D0E3E8360DCFC1E1415AD53;511.
  ) 
 Here is how much of TeX's memory you used:
- 11075 strings out of 468135
- 175650 string characters out of 5435616
- 594650 words of memory out of 5000000
- 39576 multiletter control sequences out of 15000+600000
- 633710 words of font info for 64 fonts, out of 8000000 for 9000
+ 11079 strings out of 468135
+ 176937 string characters out of 5435616
+ 589689 words of memory out of 5000000
+ 39588 multiletter control sequences out of 15000+600000
+ 632222 words of font info for 59 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,9n,79p,339b,450s stack positions out of 10000i,1000n,20000p,200000b,200000s
- </home/arpit/.miktex/texmfs/data/fonts/pk/ljfour/jknappen/ec/dpi600/tcrm1095.pk></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmsy10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmtt10.pfb>
-Output written on report.pdf (2 pages, 94782 bytes).
+ 75i,6n,79p,555b,446s stack positions out of 10000i,1000n,20000p,200000b,200000s
+</home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmbx12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr10.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmr12.pfb></home/arpit/.miktex/texmfs/install/fonts/type1/public/amsfonts/cm/cmtt10.pfb>
+Output written on report.pdf (2 pages, 485085 bytes).
 PDF statistics:
- 65 PDF objects out of 1000 (max. 8388607)
- 15 named destinations out of 1000 (max. 500000)
- 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 62 PDF objects out of 1000 (max. 8388607)
+ 8 named destinations out of 1000 (max. 500000)
+ 35 words of extra memory for PDF output out of 10000 (max. 10000000)
 

@@ -55,7 +55,7 @@
 
 \textbf{Observation:} As the background UDP load increases (from Light to Heavy), link utilization decreases slightly, while JFI remains nearly 1. This indicates fairness is preserved even under heavy interference.
 
-\textbf{Reason:} Since the queue size on the switches are fixed, therefore when another bursty flow is introduced it keeps the high percentage of the queue occupied. This causes the loss of packets sent based on reliability, which leads to retransmission, hence decrease in throughput and link utilisation.
+\textbf{Reason:} Since the queue size on the switches are fixed, therefore when another bursty flow is introduced it keeps the high percentage of the queue occupied. This causes the loss of packets sent based on reliability, which leads to retransmission, hence decrease in throughput and link utilisation. The other reason includes the fact that UDP flows do not react to congestion. When the TCP-like flows reduce their congestion window to decrease their flow rates, the UPD flows still sends out data at the same rate. This increases losses due to queuing up.
 
 \begin{figure}[h!]
   \centering

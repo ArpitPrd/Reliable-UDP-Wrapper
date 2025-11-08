@@ -9,57 +9,43 @@
 \geometry{margin=1in}
 
 \title{\textbf{Assignment 4 – Part 1: Reliable Data Transfer over UDP}}
-\author{Name: \underline{\hspace{4cm}} \\ Roll No: \underline{\hspace{3cm}} \\ Course: Computer Networks}
+\author{Name: Arpit Prasad and Akshat Bhasin \\ Roll No: 2022EE11837 and 2022EE31996 \\ Course: Computer Networks}
 \date{}
 
 \begin{document}
 \maketitle
 
-\section*{1. Introduction}
-This report presents the design and analysis of a reliable file transfer protocol implemented over UDP. Since UDP is unreliable, reliability mechanisms were implemented at the application layer using a sliding window approach.
+\section{Header Structure}
+When server sends to client we have: (here we do not use the reserved bytes section)
 
-\section*{2. Design Overview}
-\subsection*{2.1 Header Structure}
-Each packet has a maximum payload size of 1200 bytes with a 20-byte custom header:
-\begin{center}
-\texttt{| Seq Num (4 B) | Reserved/Optional (16 B) | Data (($\leq$ 1180 B) |}
-\end{center}
+\texttt{| 0-3 : Sequence Number | 4-19 : Reserved (all zeros) | 20-... : Data |}
 
-\subsection*{2.2 Reliability Mechanisms}
-\begin{itemize}
-  \item \textbf{Sliding Window:} Ensures in-order delivery and controlled transmission.
-  \item \textbf{Acknowledgments:} Cumulative ACKs; optional SACK support.
-  \item \textbf{Timeouts and Retransmissions:} RTO is estimated adaptively.
-  \item \textbf{Fast Retransmit:} Triggered after three duplicate ACKs.
-\end{itemize}
+When client sends to server: we use the reserved bits for Selective ACK, implementation where we support selectively ack-ing upto two disjoint set of seq number ranges. This increases the throughput.
 
-\section*{3. Experimental Setup}
-Experiments were run in Mininet using a two-host topology (\texttt{h1–s1–h2}) with variable delay, jitter, and loss.
+\texttt{| 0-3 : ACK Number | 4-7 : SACK1 Start | 8-11 : SACK1 End | 12-15 : SACK2 Start | 16-19 : SACK2 End |}
 
-\section*{4. Results and Analysis}
 
-\subsection*{4.1 Download Time vs Loss Rate}
+\section{Download Time vs Loss Rate}
+\textbf{Observation}: As the loss rate increases, the download time increases
+
+\textbf{Reason}: As loss rate increases the number of packets lost in flight increases. Hence the reliability mechnaism either through RTOs or Duplicate ACKs ends up retransmitting the packets. Therefore the same amount of data requires more time to transfer than non-lossy links, this increases the time of successfull reception of packets. This affect cascades to the subsequent packets and hence delays the complete file transfer.
+
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Download Time vs Loss Rate plot}}
-  \caption{Download time vs packet loss rate (placeholder).}
+  \includegraphics[width=0.8\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_loss_experiment.png}
+  \caption{Download time vs packet loss rate}
 \end{figure}
 
-\subsection*{4.2 Download Time vs Delay Jitter}
+\section{Download Time vs Delay Jitter}
+
+\textbf{Observation}: As jitter increases the download time increases.
+
+\textbf{Reason}: As jitter increases, the variation in RTT increases. This leads to instability in RTO estimation. The sender may either retransmit too early or too late, increasing total download time
+
 \begin{figure}[h!]
   \centering
-  \fbox{\parbox[c][6cm][c]{0.8\linewidth}{\centering Placeholder for Download Time vs Delay Jitter plot}}
-  \caption{Download time vs delay jitter (placeholder).}
+  \includegraphics[width=0.8\textwidth]{/home/arpit/Desktop/iitd/sem_7/COL334/projects/Reliable-UDP-Wrapper/part1/plot_jitter_experiment.png}
+  \caption{Download time vs delay jitter}
 \end{figure}
-
-\section*{5. Observations}
-\begin{itemize}
-  \item Download time increases with packet loss due to retransmissions.
-  \item Jitter affects timing but less severely than loss.
-  \item Fast retransmit reduces latency compared to timeout-based recovery.
-\end{itemize}
-
-\section*{6. Conclusion}
-The protocol ensures in-order and complete file delivery under adverse conditions, achieving reliability similar to TCP at the application layer.
 
 \end{document}

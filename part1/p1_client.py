@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-Part 1: Optimized Reliable UDP Client
-Fast packet processing and efficient ACK generation
-"""
-
 import socket
 import sys
 import time
@@ -18,8 +12,8 @@ HEADER_SIZE = 20
 MAX_DATA_SIZE = MAX_PAYLOAD - HEADER_SIZE
 REQUEST_TIMEOUT = 2.0
 MAX_REQUEST_RETRIES = 5
-ACK_DELAY = 0.0001  # Send ACKs extremely quickly (100μs) for maximum responsiveness
-ACK_EVERY_N_PACKETS = 1  # Send ACK after every single packet for fastest feedback
+ACK_DELAY = 0.0001 
+ACK_EVERY_N_PACKETS = 1  
 
 class ReliableUDPClient:
     def __init__(self, server_ip, server_port):
@@ -137,11 +131,6 @@ class ReliableUDPClient:
         """Send ACK with optimized strategy for jitter"""
         current_time = time.time()
 
-        # More aggressive ACK sending:
-        # - Always send if forced
-        # - Send if cumulative ACK advanced (important for progress)
-        # - Send if enough time passed (helps in high jitter)
-        # - Send if we have out-of-order packets (triggers SACK)
         should_send = (force or
                       self.next_expected != self.last_ack_sent or
                       current_time - self.last_ack_time > ACK_DELAY or
@@ -286,7 +275,7 @@ class ReliableUDPClient:
                     
                 # Check for timeout with adaptive threshold
                 current_time = time.time()
-                # Use shorter timeout (500ms) for better responsiveness
+                
                 timeout_threshold = 0.5
                 if current_time - last_packet_time > timeout_threshold:
                     consecutive_timeouts += 1
@@ -294,10 +283,10 @@ class ReliableUDPClient:
                     # Send duplicate ACK to trigger retransmission
                     self.send_ack(force=True)
 
-                    if consecutive_timeouts > 8:  # Increased from 5 to allow more retries
+                    if consecutive_timeouts > 8:  
                         print("Connection timeout - checking for completion")
                         
-                        # Wait a bit more for EOF
+                        
                         time.sleep(0.5)
                         try:
                             packet, addr = self.socket.recvfrom(MAX_PAYLOAD)
@@ -321,10 +310,9 @@ class ReliableUDPClient:
                         print(f"Progress: ~{progress}%")
                         last_progress = progress
                         
-                # No sleep - maximum responsiveness (CPU will spin but transfer is fast)
-                # Only sleep if we've been idle for a while
+                
                 if packets_received == 0 and consecutive_timeouts > 2:
-                    time.sleep(0.0001)  # 100μs only when idle
+                    time.sleep(0.0001)  
                     
             except KeyboardInterrupt:
                 print("\nClient interrupted")
